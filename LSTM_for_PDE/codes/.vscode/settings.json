@@ -1,0 +1,19 @@
+{
+    "workbench.colorCustomizations": {
+        "activityBar.background": "#312E14",
+        "titleBar.activeBackground": "#45411C",
+        "titleBar.activeForeground": "#FBFAF4"
+    }
+} // {
+//     "workbench.colorCustomizations": {
+//         "activityBar.background": "#0b9cb6",
+//         "titleBar.activeBackground": "#13e9e9",
+//         "titleBar.activeForeground": "#4e0beb"
+//     },
+//     "[python]": {
+//         "editor.codeActionsOnSave": {
+//           "source.organizeImports.ruff": "explicit"
+//         },
+//         "editor.formatOnSave": true
+//       }
+// }
