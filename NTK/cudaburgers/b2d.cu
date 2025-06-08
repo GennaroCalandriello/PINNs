@@ -11,7 +11,7 @@ int shift = 2;    // shift delle BC verso l'interno o l'esterno
 
 Vector2f *u, *unew, *dev_u, *dev_unew, *dev_ustar;
 float M_PI = 3.1415926535f;
-bool wantWrite = false; // se true, scrive snapshot su file
+bool wantWrite = true; // se true, scrive snapshot su file
 
 float x_min = 0.0f, x_max = 2.0f;
 float y_min = 0.0f, y_max = 2.0f;
@@ -40,8 +40,8 @@ void setupB2d() {
     for (unsigned j = 0; j < dim; j++) {
       float y = y_min + j * dy;
       unsigned idx = i * dim + j;
-      u[idx].x = 0.1f * sinf(M_PI * x) * cosf(M_PI * y);
-      u[idx].y = 0.1f * cosf(M_PI * x) * sinf(M_PI * y);
+      u[idx].x = sinf(M_PI * x) * cosf(M_PI * y);
+      u[idx].y = cosf(M_PI * x) * sinf(M_PI * y);
       unew[idx].x = 0.0f;
       unew[idx].y = 0.0f;
     }
@@ -62,7 +62,7 @@ void stepB2d() {
   dim3 blocks((dim + 15) / 16, (dim + 15) / 16);
 
   if (implicit) {
-    BurgersConvectionStep<<<blocks, threads>>>(dev_ustar, dev_u, timestep, rdx,
+    BurgersConvectionStep<<<blocks, threads>>>(dev_ustar, dev_u, timestep, dx,
                                                dim);
     cudaDeviceSynchronize();
     for (int iter = 0; iter < NUM_OF_DIFFUSION_STEPS; ++iter) {
@@ -74,7 +74,7 @@ void stepB2d() {
     std::swap(dev_u, dev_unew);
   } else {
     BurgersExplicitKernel<<<blocks, threads>>>(dev_unew, dev_u, viscosity,
-                                               timestep, rdx, dim);
+                                               timestep, dx, dim);
     cudaDeviceSynchronize();
     std::swap(dev_u, dev_unew);
   }
@@ -155,17 +155,17 @@ void mainB2d() {
     printf("Running implicit scheme...\n");
     while (framecount < MAX_FRAMES) {
       // Step esplicito unico
-      BurgersConvectionStep<<<blocks, threads>>>(dev_ustar, dev_u, timestep,
-                                                 rdx, dim);
+      BurgersConvectionStep<<<blocks, threads>>>(dev_ustar, dev_u, timestep, dx,
+                                                 dim);
       cudaDeviceSynchronize();
       // Jacobi iterato N volte, ping-pong fra dev_unew/dev_ustar
       for (int iter = 0; iter < NUM_OF_DIFFUSION_STEPS; ++iter) {
         BurgersDiffusionJacobi<<<blocks, threads>>>(
-            dev_unew, dev_ustar, viscosity, timestep, rdx, dim);
+            dev_unew, dev_ustar, viscosity, timestep, dx, dim);
         cudaDeviceSynchronize();
         std::swap(dev_unew, dev_ustar);
       }
-      std::swap(dev_u, dev_unew);
+      std::swap(dev_u, dev_ustar);
       // Salva snapshot a intervalli regolari
       if (framecount % SNAPSHOT_INTERVAL == 0) {
         cudaMemcpy(u, dev_u, dim * dim * sizeof(Vector2f),

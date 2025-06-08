@@ -12,32 +12,28 @@
 using namespace std;
 
 const char *SNAPSHOT_FILENAME = "snapshots.txt";
-const bool implicit = false; // true for implicit, false for explicit
+const bool implicit = true; // Set to true for implicit scheme
 
-// Assumed available:
-// struct Vector2f { float x, y; ... };
-// struct Vector3f { float x, y, z; ... };
-// int IND(int i, int j, int dim);
-// Vector2f bilinearInterpolation(Vector2f pos, const Vector2f *field, int dim);
-// ... periodic, etc ...
 __global__ void BurgersConvectionStep(Vector2f *ustar, const Vector2f *u,
                                       float dt, float dx, int dim) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   int j = blockDim.y * blockIdx.y + threadIdx.y;
+
+  if (i >= dim || j >= dim)
+    return;
+
   int idx = i * dim + j;
 
-  // Dirichlet BC: bordo a zero
   if (i == 0 || j == 0 || i == dim - 1 || j == dim - 1) {
     ustar[idx].x = 0.0f;
     ustar[idx].y = 0.0f;
     return;
   }
 
-  int ip = i + 1, im = i - 1, jp = j + 1, jm = j - 1;
-  int idx_ip = ip * dim + j;
-  int idx_im = im * dim + j;
-  int idx_jp = i * dim + jp;
-  int idx_jm = i * dim + jm;
+  int idx_ip = (i + 1) * dim + j;
+  int idx_im = (i - 1) * dim + j;
+  int idx_jp = i * dim + (j + 1);
+  int idx_jm = i * dim + (j - 1);
 
   float uij = u[idx].x;
   float vij = u[idx].y;
@@ -47,7 +43,6 @@ __global__ void BurgersConvectionStep(Vector2f *ustar, const Vector2f *u,
   float dvdx = (u[idx_ip].y - u[idx_im].y) / (2.0f * dx);
   float dvdy = (u[idx_jp].y - u[idx_jm].y) / (2.0f * dx);
 
-  // SOLO parte convettiva
   ustar[idx].x = uij - dt * (uij * dudx + vij * dudy);
   ustar[idx].y = vij - dt * (uij * dvdx + vij * dvdy);
 }
@@ -56,30 +51,30 @@ __global__ void BurgersDiffusionJacobi(Vector2f *unew, const Vector2f *ustar,
                                        float nu, float dt, float dx, int dim) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   int j = blockDim.y * blockIdx.y + threadIdx.y;
+
+  if (i >= dim || j >= dim)
+    return;
+
   int idx = i * dim + j;
 
-  // Dirichlet BC: bordo a zero
   if (i == 0 || j == 0 || i == dim - 1 || j == dim - 1) {
     unew[idx].x = 0.0f;
     unew[idx].y = 0.0f;
     return;
   }
 
-  int ip = i + 1, im = i - 1, jp = j + 1, jm = j - 1;
-  int idx_ip = ip * dim + j;
-  int idx_im = im * dim + j;
-  int idx_jp = i * dim + jp;
-  int idx_jm = i * dim + jm;
+  int idx_ip = (i + 1) * dim + j;
+  int idx_im = (i - 1) * dim + j;
+  int idx_jp = i * dim + (j + 1);
+  int idx_jm = i * dim + (j - 1);
 
   float alpha = dx * dx / (nu * dt);
   float beta = 4.0f + alpha;
 
-  // Jacobi per x
   unew[idx].x = (ustar[idx_ip].x + ustar[idx_im].x + ustar[idx_jp].x +
                  ustar[idx_jm].x + alpha * ustar[idx].x) /
                 beta;
 
-  // Jacobi per y
   unew[idx].y = (ustar[idx_ip].y + ustar[idx_im].y + ustar[idx_jp].y +
                  ustar[idx_jm].y + alpha * ustar[idx].y) /
                 beta;

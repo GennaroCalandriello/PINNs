@@ -10,7 +10,7 @@
                 // "mainfludis2_cu",
                 // "snaptest.cu",
                 "mb",
-                "mainburgers.cu",
+                "mainburgers2.cu",
 
                 // Include directories
                 "-I", "glew-2.1.0/include",

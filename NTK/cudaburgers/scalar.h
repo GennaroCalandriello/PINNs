@@ -15,7 +15,7 @@
 #define CLAMP(x) ((x < 0.0f) ? 0.0f : ((x > 1.0f) ? 1.0f : x))
 
 #define VEL 0.11
-#define TIMESTEP 0.001f //Noi cosa vogliamo, delta t più grandi o piu piccoli?
+#define TIMESTEP 0.005f //Noi cosa vogliamo, delta t più grandi o piu piccoli?
 #define DIM 200
 #define RES DIM
 
@@ -32,7 +32,7 @@
 #define VORTEX_RADIUS DIM / 10
 #define NUM_OF_DIFFUSION_STEPS 1
 #define SNAPSHOT_INTERVAL 1 // Number of steps between snapshots
-#define MAX_FRAMES 500 // Number of frames to capture for the animation
+#define MAX_FRAMES 200 // Number of frames to capture for the animation
 
 //Fbuoyancy =−ρβ(T−Tambient)g
 #define BETA_BOUYANCY 2e-3f // coefficiente di espansione termica (coefficiente di galleggiamento)
