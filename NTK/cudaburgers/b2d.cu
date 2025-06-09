@@ -40,8 +40,8 @@ void setupB2d() {
     for (unsigned j = 0; j < dim; j++) {
       float y = y_min + j * dy;
       unsigned idx = i * dim + j;
-      u[idx].x = sinf(M_PI * x) * cosf(M_PI * y);
-      u[idx].y = cosf(M_PI * x) * sinf(M_PI * y);
+      u[idx].x = 0.1f * sinf(M_PI * x) * cosf(M_PI * y);
+      u[idx].y = 0.1f * cosf(M_PI * x) * sinf(M_PI * y);
       unew[idx].x = 0.0f;
       unew[idx].y = 0.0f;
     }
@@ -66,8 +66,8 @@ void stepB2d() {
                                                dim);
     cudaDeviceSynchronize();
     for (int iter = 0; iter < NUM_OF_DIFFUSION_STEPS; ++iter) {
-      BurgersDiffusionJacobi<<<blocks, threads>>>(
-          dev_unew, dev_ustar, viscosity, timestep, rdx, dim);
+      BurgersDiffusionJacobi<<<blocks, threads>>>(dev_unew, dev_ustar,
+                                                  viscosity, timestep, dx, dim);
       cudaDeviceSynchronize();
       std::swap(dev_unew, dev_ustar);
     }
@@ -191,7 +191,7 @@ void mainB2d() {
     while (framecount < MAX_FRAMES) {
       // Step esplicito unico
       BurgersExplicitKernel<<<blocks, threads>>>(dev_unew, dev_u, viscosity,
-                                                 timestep, rdx, dim);
+                                                 timestep, dx, dim);
       cudaDeviceSynchronize();
 
       // swap buffer

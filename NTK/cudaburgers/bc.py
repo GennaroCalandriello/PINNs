@@ -174,6 +174,8 @@ def get_bottom_bc_from_history(x, t_grid=None):
     return np.vstack([ux_vals, uy_vals]).T
 
     
-if __name__ == "__main__":
-   burgers2d.setupB2d()
-   burgers2d.mainB2d()
+if __name__ == "__main__":    
+    burgers2d.setupB2d()  # Assicurati che la simulazione sia configurata correttamente
+    burgers2d.mainB2d()
+   
+

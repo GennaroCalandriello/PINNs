@@ -15,7 +15,7 @@
 #define CLAMP(x) ((x < 0.0f) ? 0.0f : ((x > 1.0f) ? 1.0f : x))
 
 #define VEL 0.11
-#define TIMESTEP 0.005f //Noi cosa vogliamo, delta t più grandi o piu piccoli?
+#define TIMESTEP 0.005 //Noi cosa vogliamo, delta t più grandi o piu piccoli?
 #define DIM 200
 #define RES DIM
 

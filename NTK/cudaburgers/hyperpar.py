@@ -22,22 +22,22 @@ save_loss = "losses/pinn_loss2d_2.npy"
 use_only_first_layer_NTK = True # If True, NTK acts only on the first layer of NN, if you want to use all layers, ensure that the
 # number of layers is about 30-40, for 500 neurons you should allocate ~1Tb on GPU!!!!!
 
-log_NTK = False
-update_lam = False
+log_NTK = True
+update_lam = True
 #hyperparameters
 x_lb = 0.0
 x_ub = 2.0
 ylb = 0.0
 yub = 2.0
 t_lb = 0.0
-t_ub = 2.0 
+t_ub = 1.0
 nu = 0.01 # Wave constant
 layers = [3, 400, 500, 500, 2] #Numerosi articoli usano pochi hidden layers, con 30-50 neuroni, che è la dimensione ideale per un kernel gradient
                                #descent performabile su tutti i layers.
 kernel_size = 400
-iterations = 10000 #epochs
+iterations = 40000 #epochs
 
-scheduler_step = 2000 # Number of steps to update the learning rate
+scheduler_step = 1000 # Number of steps to update the learning rate
 ntk_step = 100 # Number of steps to compute the NTK matrix
 
 

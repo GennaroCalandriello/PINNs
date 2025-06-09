@@ -12,8 +12,14 @@
 using namespace std;
 
 const char *SNAPSHOT_FILENAME = "snapshots.txt";
-const bool implicit = true; // Set to true for implicit scheme
+const bool implicit = true; // true for implicit, false for explicit
 
+// Assumed available:
+// struct Vector2f { float x, y; ... };
+// struct Vector3f { float x, y, z; ... };
+// int IND(int i, int j, int dim);
+// Vector2f bilinearInterpolation(Vector2f pos, const Vector2f *field, int dim);
+// ... periodic, etc ...
 __global__ void BurgersConvectionStep(Vector2f *ustar, const Vector2f *u,
                                       float dt, float dx, int dim) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
