@@ -38,6 +38,7 @@ class NeuralNet(nn.Module):
 
     def __init__(self, input_size, hidden_size, output_size):
         super(NeuralNet, self).__init__()
+        
         self.l1 = nn.Linear(input_size, hidden_size)
         # initialize weight and Biases
         nn.init.xavier_uniform_(self.l1.weight)
@@ -244,10 +245,7 @@ class PINN:
             X_bc2_batch, uv_bc2_batch = self.fetch_minibatch(self.bcs_sampler[1], batch_size // 5)
             X_bc3_batch, uv_bc3_batch = self.fetch_minibatch(self.bcs_sampler[2], batch_size // 5)
             X_bc4_batch, uv_bc4_batch = self.fetch_minibatch(self.bcs_sampler[3], batch_size // 5)
-            # print("one value of X_ics_batch", X_ics_batch[0,:])ù
-            # print("shape of X_ics_batch", X_ics_batch.shape) #shape is kernel_size//5
-            # print(X_bc1_batch.shape, X_bc2_batch.shape, X_bc3_batch.shape, X_bc4_batch.shape)
-            # print(X_bc1_batch[0:5,:])
+
             # Tensor
             # X_ics_batch_tens = torch.tensor(X_ics_batch, requires_grad=True).float().to(device)
             # uv_ics_batch_tens = torch.tensor(uv_ics_batch, requires_grad=True).float().to(device)
@@ -275,14 +273,23 @@ class PINN:
             loss_ru = torch.mean(ru_pred ** 2)
             loss_rv = torch.mean(rv_pred ** 2)
             
-            loss_bcs = torch.mean((uv_bc1_batch_tens[:, 0:1] - u_pred_bc1) ** 2) \
-                    + torch.mean((uv_bc1_batch_tens[:, 1:2] - v_pred_bc1) ** 2) \
-                    + torch.mean((uv_bc2_batch_tens[:, 0:1] - u_pred_bc2) ** 2) \
-                    + torch.mean((uv_bc2_batch_tens[:, 1:2] - v_pred_bc2) ** 2) \
-                    + torch.mean((uv_bc3_batch_tens[:, 0:1] - u_pred_bc3) ** 2) \
-                    + torch.mean((uv_bc3_batch_tens[:, 1:2] - v_pred_bc3) ** 2) \
-                    + torch.mean((uv_bc4_batch_tens[:, 0:1] - u_pred_bc4) ** 2) \
-                    + torch.mean((uv_bc4_batch_tens[:, 1:2] - v_pred_bc4) ** 2)     
+            # loss_bcs = torch.mean((uv_bc1_batch_tens[:, 0:1] - u_pred_bc1) ** 2) \
+            #         + torch.mean((uv_bc1_batch_tens[:, 1:2] - v_pred_bc1) ** 2) \
+            #         + torch.mean((uv_bc2_batch_tens[:, 0:1] - u_pred_bc2) ** 2) \
+            #         + torch.mean((uv_bc2_batch_tens[:, 1:2] - v_pred_bc2) ** 2) \
+            #         + torch.mean((uv_bc3_batch_tens[:, 0:1] - u_pred_bc3) ** 2) \
+            #         + torch.mean((uv_bc3_batch_tens[:, 1:2] - v_pred_bc3) ** 2) \
+            #         + torch.mean((uv_bc4_batch_tens[:, 0:1] - u_pred_bc4) ** 2) \
+            #         + torch.mean((uv_bc4_batch_tens[:, 1:2] - v_pred_bc4) ** 2)     
+            
+            loss_bcs = torch.mean(( u_pred_bc1) ** 2) \
+                    + torch.mean(( v_pred_bc1) ** 2) \
+                    + torch.mean(( u_pred_bc2) ** 2) \
+                    + torch.mean(( v_pred_bc2) ** 2) \
+                    + torch.mean((u_pred_bc3) ** 2) \
+                    + torch.mean(( v_pred_bc3) ** 2) \
+                    + torch.mean(( u_pred_bc4) ** 2) \
+                    + torch.mean(( v_pred_bc4) ** 2)    
             # loss_ics = torch.mean((uv_ics_batch_tens[:, 0:1] - u_pred_ics) ** 2) \
             #         + torch.mean((uv_ics_batch_tens[:, 1:2] -v_pred_ics) ** 2)
                     
@@ -520,10 +527,8 @@ def main():
     train_bool = True
     #train
     if train_bool:
+        
         print("Training the model...")
-        
-        
-
         model.train(iterations, batch_size=kernel_size, log_NTK=log_NTK, update_lam=update_lam)
 
         #save model
@@ -569,7 +574,7 @@ def animate_plot_2d():
     model.nn.load_state_dict(torch.load(save_model))
 
     # 2) Build evaluation grid (2D x-y, loop in time)
-    Nx, Ny, Nt = 200, 200, 100
+    Nx, Ny, Nt = 200, 200, 200
     t_lin = np.linspace(dom_coord[0,0], dom_coord[1,0], Nt)
     x_lin = np.linspace(dom_coord[0,1], dom_coord[1,1], Nx)
     y_lin = np.linspace(dom_coord[0,2], dom_coord[1,2], Ny)
@@ -578,22 +583,22 @@ def animate_plot_2d():
     # 3) Prepare storage for |velocity| frames
     U_frames = []
     with torch.no_grad():
-        for i, t_val in enumerate(t_lin):
-            # (Ny*Nx, 3): t, x, y
+        for t_val in t_lin:
             pts = np.column_stack([
                 np.full(X.size, t_val), X.ravel(), Y.ravel()
             ])
-            u_pred, v_pred = model.predict_uv(pts)  # shape (Ny*Nx, 2)
+            u_pred, v_pred = model.predict_uv(pts)
             u_pred = u_pred.reshape(Ny, Nx)
             v_pred = v_pred.reshape(Ny, Nx)
-            mag = np.sqrt(u_pred**2 + v_pred**2)  # shape (Ny, Nx)
+            mag = np.sqrt(u_pred**2 + v_pred**2)
             U_frames.append(mag)
 
     # 4) Setup the plot
     fig, ax = plt.subplots(figsize=(6,5))
     vmin = np.min(U_frames)
     vmax = np.max(U_frames)
-    cax = ax.pcolormesh(X, Y, U_frames[0], cmap='viridis', shading='auto', vmin=vmin, vmax=vmax)
+    cax = ax.imshow(U_frames[0], origin='lower', cmap='jet', vmin=vmin, vmax=vmax,
+                    extent=[x_lin.min(), x_lin.max(), y_lin.min(), y_lin.max()])
     title = ax.set_title(f'time = {t_lin[0]:.3f}')
     fig.colorbar(cax, ax=ax, label=r'$|\vec{u}|$')
     ax.set_xlabel('x')
@@ -601,7 +606,8 @@ def animate_plot_2d():
 
     # 5) Update function
     def update(frame):
-        cax.set_array(U_frames[frame].ravel())
+        # imshow update: use set_data with a 2D array, not ravel!
+        cax.set_data(U_frames[frame])
         title.set_text(f'time = {t_lin[frame]:.3f}')
         return cax, title
 
@@ -612,11 +618,12 @@ def animate_plot_2d():
     plt.show()
     return ani
 
+
     
 if __name__ == '__main__':
                 
     #load the model
-    # main()
+    main()
     # plot_loss()
     # plot()
     animate_plot_2d()

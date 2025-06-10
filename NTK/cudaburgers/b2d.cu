@@ -11,10 +11,10 @@ int shift = 2;    // shift delle BC verso l'interno o l'esterno
 
 Vector2f *u, *unew, *dev_u, *dev_unew, *dev_ustar;
 float M_PI = 3.1415926535f;
-bool wantWrite = true; // se true, scrive snapshot su file
+bool wantWrite = false; // se true, scrive snapshot su file
 
-float x_min = 0.0f, x_max = 2.0f;
-float y_min = 0.0f, y_max = 2.0f;
+float x_min = -1.0f, x_max = 1.0f;
+float y_min = -1.0f, y_max = 1.0f;
 float dx = (x_max - x_min) / (dim - 1);
 float dy = (y_max - y_min) / (dim - 1);
 vector<vector<float>>
