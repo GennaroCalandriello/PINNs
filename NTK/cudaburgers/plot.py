@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-dim = 200
+dim = 300
 data = np.loadtxt("snapshots.txt", delimiter=",")
 N_space, M_times = data.shape
 print("N_space:", N_space, "M_times:", M_times)

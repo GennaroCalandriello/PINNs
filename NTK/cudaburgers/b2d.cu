@@ -11,7 +11,7 @@ int shift = 2;    // shift delle BC verso l'interno o l'esterno
 
 Vector2f *u, *unew, *dev_u, *dev_unew, *dev_ustar;
 float M_PI = 3.1415926535f;
-bool wantWrite = false; // se true, scrive snapshot su file
+bool wantWrite = true; // se true, scrive snapshot su file
 
 float x_min = -1.0f, x_max = 1.0f;
 float y_min = -1.0f, y_max = 1.0f;
@@ -40,8 +40,8 @@ void setupB2d() {
     for (unsigned j = 0; j < dim; j++) {
       float y = y_min + j * dy;
       unsigned idx = i * dim + j;
-      u[idx].x = 0.1f * sinf(M_PI * x) * cosf(M_PI * y);
-      u[idx].y = 0.1f * cosf(M_PI * x) * sinf(M_PI * y);
+      u[idx].x = sinf(M_PI * x) * cosf(M_PI * y);
+      u[idx].y = cosf(M_PI * x) * sinf(M_PI * y);
       unew[idx].x = 0.0f;
       unew[idx].y = 0.0f;
     }

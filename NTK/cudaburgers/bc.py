@@ -178,9 +178,9 @@ if __name__ == "__main__":
     burgers2d.setupB2d()  # Assicurati che la simulazione sia configurata correttamente
     burgers2d.mainB2d()
     
-    x = 0+(2-0)*np.random.rand(100000, 3)
-    bch= get_top_bc_from_history(x)
-    print("Top BC from history:", bch)
-    #salva su file:
-    np.savetxt("bottom_bc_history.txt", bch)
+    # x = 0+(2-0)*np.random.rand(100000, 3)
+    # bch= get_top_bc_from_history(x)
+    # print("Top BC from history:", bch)
+    # #salva su file:
+    # np.savetxt("bottom_bc_history.txt", bch)
 
