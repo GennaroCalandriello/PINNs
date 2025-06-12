@@ -1,0 +1,71 @@
+{
+  "glassit.alpha": 230,
+  "glassit.step": 10,
+  "solidity.compileUsingRemoteVersion": "v0.8.24+commit.e11b9ed9",
+  "editor.formatOnSave": true,
+  "editor.formatOnType": true,
+  "editor.formatOnPaste": true,
+  "json.format.enable": false,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "workbench.settings.applyToAllProfiles": [
+    "editor.formatOnSave",
+    "editor.formatOnSaveMode"
+  ],
+  "[python]": {
+    "diffEditor.ignoreTrimWhitespace": false,
+    "editor.formatOnType": true,
+    "editor.wordBasedSuggestions": "off",
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true
+  },
+  "editor.minimap.enabled": false,
+  "[cpp]": {
+    "editor.wordBasedSuggestions": "off",
+    "editor.suggest.insertMode": "replace",
+    "editor.semanticHighlighting.enabled": true,
+    "editor.defaultFormatter": "xaver.clang-format",
+    "editor.formatOnSave": true,
+    "editor.formatOnType": true
+  },
+  "[cuda-cpp]": {
+    "editor.defaultFormatter": "xaver.clang-format",
+    "editor.formatOnSave": true,
+    "editor.formatOnType": true
+  },
+  "cmake.showOptionsMovedNotification": false,
+  "cmake.configureOnOpen": true,
+  "explorer.confirmDelete": false,
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": false,
+    "markdown": false,
+    "scminput": false,
+    "cuda": true
+  },
+  "git.openRepositoryInParentFolders": "never",
+  "workbench.colorTheme": "Shades of Cyan theme",
+  "python.defaultInterpreterPath": "C:\\Users\\vanho\\anaconda3\\envs\\dirac\\python.exe",
+  "workbench.colorCustomizations": {
+    "activityBar.background": "#452238",
+    "titleBar.activeBackground": "#602F4F",
+    "titleBar.activeForeground": "#FCF9FB"
+  },
+  "files.associations": {
+    "*.cu": "cuda-cpp",
+    "*.cuh": "cuda-cpp",
+    "deque": "cpp",
+    "format": "cpp",
+    "list": "cpp",
+    "vector": "cpp",
+    "xstring": "cpp",
+    "array": "cpp",
+    "initializer_list": "cpp",
+    "queue": "cpp",
+    "random": "cpp",
+    "utility": "cpp",
+    "xhash": "cpp",
+    "xtree": "cpp",
+    "xutility": "cpp"
+  }
+}

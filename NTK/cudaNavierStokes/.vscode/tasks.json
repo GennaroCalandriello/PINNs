@@ -1,0 +1,116 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "MainB2d",
+            "type": "shell",
+            "command": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe",
+            "args": [
+                "-o",
+                // "mainfludis2_cu",
+                // "snaptest.cu",
+                "mb",
+                "mainburgers.cu",
+
+                // Include directories
+                "-I", "glew-2.1.0/include",
+                "-I", "glfw-3.4.bin.WIN64/include",
+                //include eigen
+                "-I", "C:/Users/vanho/Desktop/GitHub/HPC/cuda/RedOrdMod/eigen/",
+
+                // Library directories
+                "-L", "glew-2.1.0/lib/Release/x64",
+                "-L", "glfw-3.4.bin.WIN64/lib-vc2019",
+
+                // Linker options
+                "-lglew32",
+                "-lglfw3",
+                "-lopengl32",
+                "-lgdi32",
+                "-luser32",
+                "-lshell32",
+                "-lkernel32",
+                "-ladvapi32",
+                "-lole32",
+                "-lwinmm",
+                "-lcomdlg32",
+                "-lcusolver",
+                "-lcublas",
+
+                // CUDA libraries
+                "-lcurand",
+
+                // Instruct the host compiler to use the multithreaded DLL runtime
+                "-Xcompiler", "/MD",
+
+                // // Suppress default library LIBCMT
+                // "-Xlinker", "/NODEFAULTLIB:LIBCMT",
+
+                // // Ensure the subsystem is set to console
+                // "-Xlinker", "/SUBSYSTEM:CONSOLE"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"],
+            "detail": "Generated task for CUDA"
+        },
+
+        {
+                        "label": "Build Navier-Stokes 2D Pybind11 Module",
+                        "type": "shell",
+                        "command": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe",
+                        "args": [
+                            "-shared",
+                            "-o", "navier2d.pyd" , // <-- output prefix, see below for extension
+                            "ns2d.cu",
+
+                            // Include dirs (pybind11 & python)
+                            "-I", "C:/ProgramData/anaconda3/Include",
+                            "-I", "C:/Users/vanho/AppData/Roaming/Python/Python312/site-packages/pybind11/include",
+                            "-I", "glew-2.1.0/include",
+                            "-I", "glfw-3.4.bin.WIN64/include",
+                            "-I", "C:/Users/vanho/Desktop/GitHub/HPC/cuda/RedOrdMod/eigen/",
+
+                            // Linker: CUDA and system
+                            "-L", "glew-2.1.0/lib/Release/x64",
+                            "-L", "glfw-3.4.bin.WIN64/lib-vc2019",
+
+                            "-lglew32",
+                            "-lglfw3",
+                            "-lopengl32",
+                            "-lgdi32",
+                            "-luser32",
+                            "-lshell32",
+                            "-lkernel32",
+                            "-ladvapi32",
+                            "-lole32",
+                            "-lwinmm",
+                            "-lcomdlg32",
+                            "-lcusolver",
+                            "-lcublas",
+                            "-lcurand",
+
+                            // Python3.lib for linker!
+                           "-L", "C:/Users/vanho/Desktop/GitHub/HPC/cuda/Navier_Stokes_2DBackup/.conda/libs",
+                            "-lpython312",
+
+                            // shared library + multithreaded DLL runtime
+                            "-Xcompiler", "/MD"
+                        ],
+                        "group": {
+                            "kind": "build",
+                            "isDefault": true
+                        },
+                        "problemMatcher": ["$gcc"],
+                        "detail": "Build Burgers2D CUDA Pybind11 module"
+                    }
+
+
+    ]
+
+
+}
+
+

@@ -1,0 +1,31 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/Users/vanho/Desktop/GitHub/HPC/cuda/RedOrdMod/eigen/",
+                "C:/Users/vanho/AppData/Roaming/Python/Python312/site-packages/pybind11/include",
+                "C:/Users/vanho/Desktop/GitHub/HPC/cuda/Navier_Stokes_2DBackup/.conda/libs"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "windowsSdkVersion": "10.0.22621.0",
+            "compilerPath": "cl.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}
+
+// Include dirs (pybind11 & python)
+// "-I", "C:/ProgramData/anaconda3/Include",
+// "-I", "C:/Users/vanho/AppData/Roaming/Python/Python312/site-packages/pybind11/include",
+// "-I", "glew-2.1.0/include",
+// "-I", "glfw-3.4.bin.WIN64/include",
+// "-I", "C:/Users/vanho/Desktop/GitHub/HPC/cuda/RedOrdMod/eigen/",
