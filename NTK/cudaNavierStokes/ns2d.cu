@@ -7,7 +7,7 @@
 int framecount = 0;
 float t_current = 0;
 float eps = 0.0f; // per le condizioni al contorno
-int shift = 2;    // shift delle BC verso l'interno o l'esterno
+int shift =1;    // shift delle BC verso l'interno o l'esterno
 
 Vector2f *u, *dev_u;
 float *p, *c, *dev_p, *dev_c;

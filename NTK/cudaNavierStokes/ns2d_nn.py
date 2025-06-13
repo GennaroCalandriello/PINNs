@@ -1,7 +1,8 @@
 from hyperpar import *
 from bc import *
 
-pde_bool = True
+ics_bool = True
+batch_ratio_bc = 4
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"  # Avoids KMP duplicate lib error
 
 # References: [1] Is the Neural tangent kernel of PINNs deep learning general PDE always convergent? https://arxiv.org/abs/2412.06158
@@ -69,16 +70,24 @@ class BCSampler:
         self.fixed_values = np.array(fixed_values)
         self.name = name
 
-    def sample(self, N):
-        # Uniform random sampling for all dimensions
-        x = self.coords[0:1, :] + (
-            self.coords[1:2, :] - self.coords[0:1, :]
-        ) * np.random.rand(N, self.dim)
-        # Fix specified boundary coordinates
-        for i, d in enumerate(self.fixed_dims):
-            x[:, d] = self.fixed_values[i]
-        y = self.func(x)
+    # def sample(self, N):
+    #     # Uniform random sampling for all dimensions
+    #     x = self.coords[0:1, :] + (
+    #         self.coords[1:2, :] - self.coords[0:1, :]
+    #     ) * np.random.rand(N, self.dim)
+    #     # Fix specified boundary coordinates
+    #     for i, d in enumerate(self.fixed_dims):
+    #         x[:, d] = self.fixed_values[i]
+    #     y = self.func(x)
 
+    #     return x, y
+    def sample(self, N):
+        mean = 0.5 * (self.coords[0, :] + self.coords[1, :])
+        std = 0.15 * (self.coords[1, :] - self.coords[0, :])
+        x = mean + std * np.random.randn(N, self.dim)
+        for d in range(self.dim):
+            x[:, d] = np.clip(x[:, d], self.coords[0, d], self.coords[1, d])
+        y = self.func(x)
         return x, y
 
 
@@ -124,21 +133,26 @@ class NeuralNet(nn.Module):
         mask = obstacle_mask(xx, yy)  # shape (batch, 1) o (batch,)
 
         # IC nel fluido, zero (o BC solida) nell'ostacolo
-        u_ic = u_ic_torch(xx, yy) * mask
-        v_ic = v_ic_torch(xx, yy) * mask
+        u_ic = u_ic_torch(xx, yy)
+        v_ic = v_ic_torch(xx, yy)
         p_ic = torch.zeros_like(xx)  # o p_ic_torch(xx, yy) * mask, se vuoi
         # Se t=0, la rete restituisce direttamente l’IC con l’ostacolo encode-ato
 
-        u = u_ic + t * out[:, 0:1] * mask
-        v = v_ic + t * out[:, 1:2] * mask
-        p = p_ic + t * out[:, 2:3] * mask
+        # u = u_ic + (1 - torch.exp(0.5 * t)) * out[:, 0:1]
+        # v = v_ic + (1 - torch.exp(0.5 * t)) * out[:, 1:2]
+        u = out[:, 0:1]
+        v = out[:, 1:2]
+        # p = (1-torch.exp(-0.5*t))*out[:, 2:3]
+        p = out[:, 2:3]  # Non imposto p_ic, ma lo lascio libero
 
         return torch.cat([u, v, p], dim=1)  # (batch, 2)
 
 
 class PINN:
     # Initialize the class
-    def __init__(self, layers, operator, bcs_sampler, res_sampler, nu, kernel_size):
+    def __init__(
+        self, layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size
+    ):
 
         # Normalization
         # Assume res_sampler samples over [t, x, y]
@@ -150,7 +164,7 @@ class PINN:
 
         # Samplers
         self.operator = operator
-        # self.ics_sampler = ics_sampler
+        self.ics_sampler = ics_sampler
         self.bcs_sampler = bcs_sampler
         self.res_sampler = res_sampler
 
@@ -158,6 +172,9 @@ class PINN:
         self.lam_bc_val = (
             torch.tensor(1.0).float().to(device)
         )  # for boundary conditions
+        self.lam_ic_val = (
+            torch.tensor(10.0).float().to(device)
+        )  # for initial conditions
         self.lam_ru_val = torch.tensor(1.0).float().to(device)  # for residuals u
         self.lam_rv_val = torch.tensor(1.0).float().to(device)  # for residuals v
         self.lam_div_val = torch.tensor(1.0).float().to(device)  # for divergence
@@ -188,14 +205,14 @@ class PINN:
 
         # Logger
         self.loss_bcs_log = []
-        # self.loss_ic_log = []
+        self.loss_ic_log = []
         self.loss_ru_log = []
         self.loss_rv_log = []
         self.loss_div_log = []
         self.loss_total_log = []
 
         # NTK logger
-        # self.K_ic_log = []
+        self.K_ic_log = []
         self.K_bc_log = []
         self.K_ru_log = []
         self.K_rv_log = []
@@ -203,7 +220,7 @@ class PINN:
 
         # weights logger
         self.lam_bc_log = []
-        # self.lam_ic_log = []
+        self.lam_ic_log = []
         self.lam_ru_log = []
         self.lam_rv_log = []
         self.lam_div_log = []
@@ -324,7 +341,7 @@ class PINN:
         """
         non normalizza proprio un cazz
         """
-        mse = torch.mean((prediction) ** 2)
+        mse = torch.mean((prediction - target) ** 2)
 
         return mse
 
@@ -342,26 +359,25 @@ class PINN:
             if it % 10 == 0:
                 print(f"Iteration {it}/{nIter}")
 
-            x_bc_cyl_batch, uv_bc_cy_batch = self.fetch_minibatch(
-                self.bcs_sampler[0], batch_size // 4
+            X_ics_batch, uv_ics_batch = self.fetch_minibatch(
+                self.ics_sampler, batch_size
             )
-            # Fetch boundary mini-batches
             X_bc1_batch, uv_bc1_batch = self.fetch_minibatch(
-                self.bcs_sampler[0], batch_size // 4
+                self.bcs_sampler[0], batch_size // batch_ratio_bc
             )
             X_bc2_batch, uv_bc2_batch = self.fetch_minibatch(
-                self.bcs_sampler[1], batch_size // 4
+                self.bcs_sampler[1], batch_size // batch_ratio_bc
             )
             X_bc3_batch, uv_bc3_batch = self.fetch_minibatch(
-                self.bcs_sampler[2], batch_size // 4
+                self.bcs_sampler[2], batch_size // batch_ratio_bc
             )
             X_bc4_batch, uv_bc4_batch = self.fetch_minibatch(
-                self.bcs_sampler[3], batch_size // 4
+                self.bcs_sampler[3], batch_size // batch_ratio_bc
             )
 
             # Tensor conversion
-            X_bc_cyl_tens = (
-                torch.tensor(x_bc_cyl_batch, requires_grad=True).float().to(device)
+            X_ics_batch_tens = (
+                torch.tensor(X_ics_batch, requires_grad=True).float().to(device)
             )
             X_bc1_batch_tens = (
                 torch.tensor(X_bc1_batch, requires_grad=True).float().to(device)
@@ -375,6 +391,9 @@ class PINN:
             X_bc4_batch_tens = (
                 torch.tensor(X_bc4_batch, requires_grad=True).float().to(device)
             )
+            uv_ics_batch_tens = (
+                torch.tensor(uv_ics_batch, requires_grad=True).float().to(device)
+            )
             uv_bc1_batch_tens = (
                 torch.tensor(uv_bc1_batch, requires_grad=True).float().to(device)
             )
@@ -387,9 +406,7 @@ class PINN:
             uv_bc4_batch_tens = (
                 torch.tensor(uv_bc4_batch, requires_grad=True).float().to(device)
             )
-            uv_bc_cy_batch_tens = (
-                torch.tensor(uv_bc_cy_batch, requires_grad=True).float().to(device)
-            )
+
             # print("some values of X_bc1_batch_tens:", X_bc1_batch_tens[:5])
             # print("some values of uv_bc1_batch_tens:", uv_bc1_batch_tens[:5])
             # print("some values of X_bc2_batch_tens:", X_bc2_batch_tens[:5])
@@ -398,6 +415,11 @@ class PINN:
             # print("some values of uv_bc3_batch_tens:", uv_bc3_batch_tens[:5])
 
             # Compute the predictions for boundary conditions
+            u_pred_ics, v_pred_ics, _ = self.net_uvp(
+                X_ics_batch_tens[:, 0:1],
+                X_ics_batch_tens[:, 1:2],
+                X_ics_batch_tens[:, 2:3],
+            )
             u_pred_bc1, v_pred_bc1, _ = self.net_uvp(
                 X_bc1_batch_tens[:, 0:1],
                 X_bc1_batch_tens[:, 1:2],
@@ -418,15 +440,10 @@ class PINN:
                 X_bc4_batch_tens[:, 1:2],
                 X_bc4_batch_tens[:, 2:3],
             )
-            u_pred_cy, v_pred_cy, _ = self.net_uvp(
-                X_bc_cyl_tens[:, 0:1],
-                X_bc_cyl_tens[:, 1:2],
-                X_bc_cyl_tens[:, 2:3],
-            )
 
             # PDE residuals
             # Fetch residual mini-batch
-            X_res_batch, _ = self.fetch_minibatch(self.res_sampler, batch_size)
+            X_res_batch, _ = self.fetch_minibatch(self.res_sampler, batch_size * 2)
             X_res_batch_tens = (
                 torch.tensor(X_res_batch, requires_grad=True).float().to(device)
             )
@@ -441,6 +458,10 @@ class PINN:
             loss_ru = torch.mean(ru_pred**2)
             loss_rv = torch.mean(rv_pred**2)
             loss_rdiv = torch.mean(rdiv_pred**2)
+            loss_ic = torch.mean(
+                (u_pred_ics - uv_ics_batch_tens[:, 0:1]) ** 2
+                + (v_pred_ics - uv_ics_batch_tens[:, 1:2]) ** 2
+            )
 
             # Normalized losses for BCs
             loss_bc1_u = self.normalize_loss(u_pred_bc1, uv_bc1_batch_tens[:, 0:1])
@@ -468,7 +489,10 @@ class PINN:
                 + self.lam_rv_val * loss_rv
                 + self.lam_bc_val * loss_bcs
                 + self.lam_div_val * loss_rdiv
+                # + self.lam_ic_val * loss_ic
             )
+            if ics_bool:
+                loss += self.lam_ic_val * loss_ic
 
             # Backward and optimize
             self.optimizer_Adam.zero_grad()
@@ -478,25 +502,29 @@ class PINN:
             if it % scheduler_step == 0:
                 self.my_lr_scheduler.step()
 
-            # Print
-            if it % ntk_step == 0:
+            # Store losses
+            if it % 10 == 0:
 
-                # Store losses
+                self.loss_ic_log.append(loss_ic.detach().cpu().numpy())
                 self.loss_bcs_log.append(loss_bcs.detach().cpu().numpy())
                 self.loss_ru_log.append(loss_ru.detach().cpu().numpy())
                 self.loss_rv_log.append(loss_rv.detach().cpu().numpy())
                 self.loss_div_log.append(loss_rdiv.detach().cpu().numpy())
                 self.loss_total_log.append(loss.detach().cpu().numpy())
 
+            # Print
+            if it % ntk_step == 0:
+
                 print("Epoch:", it, "/", nIter)
                 print(
-                    "Loss: %.3e, Loss_bcs: %.3e, Loss_ru: %.3e, Loss_rv: %.3e, Loss_rdiv: %.3e"
-                    % (loss.item(), loss_bcs, loss_ru, loss_rv, loss_rdiv)
+                    "Loss: %.3e, Loss_bcs: %.3e, Loss_ru: %.3e, Loss_rv: %.3e, Loss_rdiv: %.3e, Loss_ic: %.3e"
+                    % (loss.item(), loss_bcs, loss_ru, loss_rv, loss_rdiv, loss_ic)
                 )
                 print(f"lambda_bc: {self.lam_bc_val:3e}")
                 print(f"lambda_ru: {self.lam_ru_val:3e}")
                 print(f"lambda_rv: {self.lam_rv_val:3e}")
                 print(f"lambda_div: {self.lam_div_val:3e}")
+                print(f"lambda_ic: {self.lam_ic_val:3e}")
                 print("Learning rate: ", self.my_lr_scheduler.get_last_lr()[0])
 
             if log_NTK:
@@ -522,12 +550,18 @@ class PINN:
                     K_rv_value = 0
                     K_div_value = 0
 
+                    u_ic, v_ic, _ = self.net_uvp(
+                        X_ics_batch_tens[:, 0:1],
+                        X_ics_batch_tens[:, 1:2],
+                        X_ics_batch_tens[:, 2:3],
+                    )
                     u_bc, v_bc, _ = self.net_uvp(
                         X_bc_batch_tens[:, 0:1],
                         X_bc_batch_tens[:, 1:2],
                         X_bc_batch_tens[:, 2:3],
                     )
                     bc_ntk_pred = torch.cat([u_bc, v_bc], dim=0)
+                    ic_ntk_pred = torch.cat([u_ic, v_ic], dim=0)
 
                     res_ntk_u, res_ntk_v, res_ntkdiv = self.net_r(
                         X_res_batch_tens[:, 0:1],
@@ -536,18 +570,25 @@ class PINN:
                     )
 
                     # Jacobian of the neural networks
+                    if ics_bool:
+                        J_ics = self.compute_jacobian(ic_ntk_pred, params)
+
                     J_bc = self.compute_jacobian(bc_ntk_pred, params)
                     J_ru = self.compute_jacobian(res_ntk_u, params)
                     J_rv = self.compute_jacobian(res_ntk_v, params)
                     j_rdiv = self.compute_jacobian(res_ntkdiv, params)
 
                     # Neural tangent kernels of the neural networks / Trace values
+                    if ics_bool:
+                        K_ic_value = self.compute_ntk(J_ics, self.D2, J_ics, self.D2)
                     K_bc_value = self.compute_ntk(J_bc, self.D1, J_bc, self.D1)
                     K_ru_value = self.compute_ntk(J_ru, self.D3, J_ru, self.D3)
                     K_rv_value = self.compute_ntk(J_rv, self.D3, J_rv, self.D3)
                     K_div_value = self.compute_ntk(j_rdiv, self.D3, j_rdiv, self.D3)
 
                     # Convert tensor to numpy array
+                    if ics_bool:
+                        K_ic_value = K_ic_value.detach().cpu().numpy()
                     K_bc_value = K_bc_value.detach().cpu().numpy()
                     K_ru_value = K_ru_value.detach().cpu().numpy()
                     K_rv_value = K_rv_value.detach().cpu().numpy()
@@ -559,24 +600,30 @@ class PINN:
                         + np.trace(K_rv_value)
                         + np.trace(K_div_value)
                     )
+                    if ics_bool:
+                        trace_K += np.trace(K_ic_value)
 
                     # Store Trace values
                     self.K_bc_log.append(K_bc_value)
                     self.K_ru_log.append(K_ru_value)
                     self.K_rv_log.append(K_rv_value)
                     self.K_div_log.append(K_div_value)
+                    self.K_ic_log.append(K_ic_value)
 
                     if update_lam:
                         self.lam_bc_val = trace_K / np.trace(K_bc_value)
                         self.lam_ru_val = trace_K / np.trace(K_ru_value)
                         self.lam_rv_val = trace_K / np.trace(K_rv_value)
                         self.lam_div_val = trace_K / np.trace(K_div_value)
+                        if ics_bool:
+                            self.lam_ic_val = trace_K / np.trace(K_ic_value)
 
                         # Store NTK weights
                         self.lam_bc_log.append(self.lam_bc_val)
                         self.lam_ru_log.append(self.lam_ru_val)
                         self.lam_rv_log.append(self.lam_rv_val)
                         self.lam_div_log.append(self.lam_div_val)
+                        self.lam_ic_log.append(self.lam_ic_val)
 
     # Evaluates predictions at test points
     def predict_uvp(self, X_star):
@@ -784,53 +831,53 @@ res_sampler = Sampler(
 # print("BC values:\n", y_top)
 print(bc1_coord[0, 1], bc2_coord[0, 1], bc3_coord[0, 2], bc4_coord[0, 2])
 
-# bc1_sampler = BCSampler(
-#     3,
-#     bc1_coord,
-#     get_left_bc_from_history,
-#     fixed_dims=[1],
-#     fixed_values=[x_lb],
-#     name="BC1",
-# )
-# bc2_sampler = BCSampler(
-#     3,
-#     bc2_coord,
-#     get_right_bc_from_history,
-#     fixed_dims=[1],
-#     fixed_values=[x_ub],
-#     name="BC2",
-# )
-# bc3_sampler = BCSampler(
-#     3,
-#     bc3_coord,
-#     get_top_bc_from_history,
-#     fixed_dims=[2],
-#     fixed_values=[yub],
-#     name="BC3",
-# )
-# bc4_sampler = BCSampler(
-#     3,
-#     bc4_coord,
-#     get_bottom_bc_from_history,
-#     fixed_dims=[2],
-#     fixed_values=[ylb],
-#     name="BC4",
-# )
+bc1_sampler = BCSampler(
+    3,
+    bc1_coord,
+    get_left_bc_from_history,
+    fixed_dims=[1],
+    fixed_values=[x_lb],
+    name="BC1",
+)
+bc2_sampler = BCSampler(
+    3,
+    bc2_coord,
+    get_right_bc_from_history,
+    fixed_dims=[1],
+    fixed_values=[x_ub],
+    name="BC2",
+)
+bc3_sampler = BCSampler(
+    3,
+    bc3_coord,
+    get_top_bc_from_history,
+    fixed_dims=[2],
+    fixed_values=[yub],
+    name="BC3",
+)
+bc4_sampler = BCSampler(
+    3,
+    bc4_coord,
+    get_bottom_bc_from_history,
+    fixed_dims=[2],
+    fixed_values=[ylb],
+    name="BC4",
+)
 
 # zero_bc = lambda x: np.zeros((x.shape[0], 2))
 # bc_cyl_sampler = Sampler()
-bc1_sampler = Sampler(
-    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-)
-bc2_sampler = Sampler(
-    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-)
-bc3_sampler = Sampler(
-    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-)
-bc4_sampler = Sampler(
-    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-)
+# bc1_sampler = Sampler(
+#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+# )
+# bc2_sampler = Sampler(
+#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+# )
+# bc3_sampler = Sampler(
+#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+# )
+# bc4_sampler = Sampler(
+#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+# )
 
 
 # bc1_sampler = Sampler(3, bc1_coord, get_left_bc_from_history, name='BC1')
@@ -838,9 +885,11 @@ bc4_sampler = Sampler(
 # bc3_sampler = Sampler(3, bc3_coord, get_top_bc_from_history, name='BC3')
 # bc4_sampler = Sampler(3, bc4_coord, get_bottom_bc_from_history, name='BC4')
 bcs_sampler = [bc1_sampler, bc2_sampler, bc3_sampler, bc4_sampler]
+ics_sampler = Sampler(
+    3, ics_coord, lambda x: np.hstack([u(x, nu), v(x, nu)]), name="ICs"
+)
 
-
-model = PINN(layers, operator, bcs_sampler, res_sampler, nu, kernel_size)
+model = PINN(layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size)
 
 
 def main():
@@ -862,9 +911,11 @@ def main():
         # save losses
         total_loss = []
         total_loss.append(model.loss_total_log)
+        total_loss.append(model.loss_ic_log)
         total_loss.append(model.loss_bcs_log)
         total_loss.append(model.loss_ru_log)
         total_loss.append(model.loss_rv_log)
+        total_loss.append(model.loss_div_log)
         np.save(save_loss, total_loss)
         print(f"Losses saved as {save_loss}")
 
@@ -872,15 +923,19 @@ def main():
 def plot_loss():
     losses = np.load(save_loss, allow_pickle=True)
     total_loss = losses[0]
-    loss_bcs = losses[1]
-    loss_ru = losses[2]
-    loss_rv = losses[3]
+    loss_ic = losses[1]
+    loss_bcs = losses[2]
+    loss_ru = losses[3]
+    loss_rv = losses[4]
+    loss_div = losses[5]
 
     plt.figure(figsize=(10, 6))
     plt.plot(total_loss, label="Total Loss")
+    plt.plot(loss_ic, label="Loss ICs")
     plt.plot(loss_bcs, label="Loss BCS")
     plt.plot(loss_ru, label="Loss ru")
     plt.plot(loss_rv, label="Loss rv")
+    plt.plot(loss_div, label="Loss div")
     # plt.plot(loss_ic, label='Loss ICS')
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
@@ -895,7 +950,9 @@ def animate_plot_2d():
     import matplotlib.animation as animation
 
     # 1) Load model
-    model = PINN(layers, operator, bcs_sampler, res_sampler, nu, kernel_size)
+    model = PINN(
+        layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size
+    )
     model.nn.load_state_dict(torch.load(save_model))
 
     # 2) Build evaluation grid (2D x-y, loop in time)
@@ -959,7 +1016,9 @@ if __name__ == "__main__":
         import matplotlib.animation as animation
 
         # 1) Load model
-        model = PINN(layers, operator, bcs_sampler, res_sampler, nu, kernel_size)
+        model = PINN(
+            layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size
+        )
         model.nn.load_state_dict(torch.load(save_model))
 
         # 2) Build evaluation grid (2D x-y, loop in time)
@@ -976,11 +1035,11 @@ if __name__ == "__main__":
             tot_frame = 0
             for t_val in t_lin:
 
-                if t_val <= 0.8:
+                if t_val >= 0.0:
                     pts = np.column_stack(
                         [np.full(X.size, t_val), X.ravel(), Y.ravel()]
                     )
-                    u_pred, v_pred = model.predict_uv(pts)
+                    u_pred, v_pred, _ = model.predict_uvp(pts)
                     u_pred = u_pred.reshape(Ny, Nx)
                     v_pred = v_pred.reshape(Ny, Nx)
                     mag = np.sqrt(u_pred**2 + v_pred**2)
@@ -1066,7 +1125,7 @@ if __name__ == "__main__":
     # burgers2d.setupB2d()  # Initialize the CFD simulation
     # burgers2d.mainB2d()
     main()
-    # errors()
+    errors()
     plot_loss()
     # plot()
     animate_plot_2d()

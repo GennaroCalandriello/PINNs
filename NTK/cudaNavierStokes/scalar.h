@@ -31,8 +31,8 @@
 #define VORTEX_STRENGTH 25.0f
 #define VORTEX_RADIUS DIM / 10
 #define NUM_OF_DIFFUSION_STEPS 1
-#define SNAPSHOT_INTERVAL 200 // Number of steps between snapshots
-#define MAX_FRAMES 20000 // Number of frames to capture for the animation
+#define SNAPSHOT_INTERVAL 100 // Number of steps between snapshots
+#define MAX_FRAMES 10000 // Number of frames to capture for the animation
 
 //Fbuoyancy =−ρβ(T−Tambient)g
 #define BETA_BOUYANCY 0.0f // coefficiente di espansione termica (coefficiente di galleggiamento)
@@ -41,7 +41,7 @@
 #define C_AMBIENT 0.0f   // Temperatura ambiente in Kelvin (20°C)
 
 //Bool variables
-#define FLUID_INJ 1
+#define FLUID_INJ 0
 #define PERIODIC_FORCE 0
 #define VORTEX 0
 
@@ -66,7 +66,7 @@
 //Puoi inserire ostacoli da obstacles.h
 #define obstacleCenterX  DIM / 2.0f // Center of the domain
 #define obstacleCenterY DIM / 2.0f
-#define obstacleRadius 45 // Adjust as needed
+#define obstacleRadius 0 // Adjust as needed
 
 // Simulation parameters
 float timestep = TIMESTEP;

@@ -34,16 +34,18 @@ t_ub = 1.0
 nu = 0.01  # Wave constant
 layers = [
     3,
-    400,
-    600,
-    600,
+    200,
+    200,
+    200,
+    200,
+    200,
     3,
 ]  # Numerosi articoli usano pochi hidden layers, con 30-50 neuroni, che è la dimensione ideale per un kernel gradient
 # descent performabile su tutti i layers. MA, se non metto almento 400-500 neuroni per layer, la rete è pessima.
-kernel_size = 300
-iterations = 6000  # epochs
+kernel_size = 400
+iterations = 4000  # epochs
 
-scheduler_step = 2000  # Number of steps to update the learning rate
+scheduler_step = 1000  # Number of steps to update the learning rate
 ntk_step = 100  # Number of steps to compute the NTK matrix
 
 # ■ it's a square!!-----------------------■
