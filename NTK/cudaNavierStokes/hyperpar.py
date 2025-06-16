@@ -24,25 +24,45 @@ use_only_first_layer_NTK = True  # If True, NTK acts only on the first layer of 
 
 log_NTK = True
 update_lam = True
+# log_NTK = False  # If True, log the NTK matrix to a file
+# update_lam = False  # If True, update the lambda parameter in the NTK matrix
+
 # hyperparameters
 x_lb = -1.0
 x_ub = 1.0
 ylb = -1.0
 yub = 1.0
 t_lb = 0.0
-t_ub = 1.0
+t_ub = 2.0
 nu = 0.01  # Wave constant
-layers = [
-    3,
-    200,
-    200,
-    200,
-    200,
-    200,
-    3,
-]  # Numerosi articoli usano pochi hidden layers, con 30-50 neuroni, che è la dimensione ideale per un kernel gradient
+import numpy as np
+
+start = 500
+end = 300
+n = 15
+
+arr = start * (end / start) ** (np.linspace(0, 1, n))
+arr = arr.astype(int)
+arr = arr.tolist()
+layers = (
+    [3] + arr + [3]
+)  # 3 input features, hidden layers decaying exponentially, 3 output features
+
+# layers = [
+#     3,
+#     450,
+#     420,
+#     400,
+#     400,
+#     380,
+#     350,
+#     300,
+#     300,
+#     300,
+#     3,
+# ]  # Numerosi articoli usano pochi hidden layers, con 30-50 neuroni, che è la dimensione ideale per un kernel gradient
 # descent performabile su tutti i layers. MA, se non metto almento 400-500 neuroni per layer, la rete è pessima.
-kernel_size = 400
+kernel_size = 100
 iterations = 4000  # epochs
 
 scheduler_step = 1000  # Number of steps to update the learning rate

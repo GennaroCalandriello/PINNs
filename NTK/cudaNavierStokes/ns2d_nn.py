@@ -1,8 +1,13 @@
 from hyperpar import *
 from bc import *
+import matplotlib.animation as animation
 
 ics_bool = True
-batch_ratio_bc = 4
+rpde_bool = True  # Residuals PDE
+
+batch_ratio_bc = 3
+batch_ratio_ic = 2
+dim = navier2d.dim
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"  # Avoids KMP duplicate lib error
 
 # References: [1] Is the Neural tangent kernel of PINNs deep learning general PDE always convergent? https://arxiv.org/abs/2412.06158
@@ -70,25 +75,26 @@ class BCSampler:
         self.fixed_values = np.array(fixed_values)
         self.name = name
 
-    # def sample(self, N):
-    #     # Uniform random sampling for all dimensions
-    #     x = self.coords[0:1, :] + (
-    #         self.coords[1:2, :] - self.coords[0:1, :]
-    #     ) * np.random.rand(N, self.dim)
-    #     # Fix specified boundary coordinates
-    #     for i, d in enumerate(self.fixed_dims):
-    #         x[:, d] = self.fixed_values[i]
-    #     y = self.func(x)
-
-    #     return x, y
     def sample(self, N):
-        mean = 0.5 * (self.coords[0, :] + self.coords[1, :])
-        std = 0.15 * (self.coords[1, :] - self.coords[0, :])
-        x = mean + std * np.random.randn(N, self.dim)
-        for d in range(self.dim):
-            x[:, d] = np.clip(x[:, d], self.coords[0, d], self.coords[1, d])
+        # Uniform random sampling for all dimensions
+        x = self.coords[0:1, :] + (
+            self.coords[1:2, :] - self.coords[0:1, :]
+        ) * np.random.rand(N, self.dim)
+        # Fix specified boundary coordinates
+        for i, d in enumerate(self.fixed_dims):
+            x[:, d] = self.fixed_values[i]
         y = self.func(x)
+
         return x, y
+
+    # def sample(self, N):
+    #     mean = 0.5 * (self.coords[0, :] + self.coords[1, :])
+    #     std = 0.15 * (self.coords[1, :] - self.coords[0, :])
+    #     x = mean + std * np.random.randn(N, self.dim)
+    #     for d in range(self.dim):
+    #         x[:, d] = np.clip(x[:, d], self.coords[0, d], self.coords[1, d])
+    #     y = self.func(x)
+    #     return x, y
 
 
 # Creating Neural Network
@@ -138,10 +144,16 @@ class NeuralNet(nn.Module):
         p_ic = torch.zeros_like(xx)  # o p_ic_torch(xx, yy) * mask, se vuoi
         # Se t=0, la rete restituisce direttamente l’IC con l’ostacolo encode-ato
 
-        # u = u_ic + (1 - torch.exp(0.5 * t)) * out[:, 0:1]
-        # v = v_ic + (1 - torch.exp(0.5 * t)) * out[:, 1:2]
-        u = out[:, 0:1]
-        v = out[:, 1:2]
+        u = u_ic + t * out[:, 0:1]
+        v = v_ic + t * out[:, 1:2]
+        # u = out[:, 0:1]
+        # v = out[:, 1:2]
+
+        u[-1] = 0
+        v[-1] = 0
+        u[0] = 0
+        v[0] = 0
+
         # p = (1-torch.exp(-0.5*t))*out[:, 2:3]
         p = out[:, 2:3]  # Non imposto p_ic, ma lo lascio libero
 
@@ -168,17 +180,17 @@ class PINN:
         self.bcs_sampler = bcs_sampler
         self.res_sampler = res_sampler
 
-        # weights
+        # ============================================================================================== weights ======================================
         self.lam_bc_val = (
-            torch.tensor(1.0).float().to(device)
+            torch.tensor(100.0).float().to(device)
         )  # for boundary conditions
         self.lam_ic_val = (
-            torch.tensor(10.0).float().to(device)
+            torch.tensor(100.0).float().to(device)
         )  # for initial conditions
         self.lam_ru_val = torch.tensor(1.0).float().to(device)  # for residuals u
         self.lam_rv_val = torch.tensor(1.0).float().to(device)  # for residuals v
-        self.lam_div_val = torch.tensor(1.0).float().to(device)  # for divergence
-
+        self.lam_div_val = torch.tensor(10.0).float().to(device)  # for divergence
+        # ====================================================================================================================================
         # Wave constant
         self.nu = torch.tensor(nu).float().to(device)
 
@@ -484,16 +496,17 @@ class PINN:
                 + loss_bc4_v
             )
 
-            loss = (
-                self.lam_ru_val * loss_ru
-                + self.lam_rv_val * loss_rv
-                + self.lam_bc_val * loss_bcs
-                + self.lam_div_val * loss_rdiv
-                # + self.lam_ic_val * loss_ic
-            )
+            loss = self.lam_bc_val * loss_bcs
+
             if ics_bool:
                 loss += self.lam_ic_val * loss_ic
 
+            if rpde_bool:
+                loss += (
+                    self.lam_ru_val * loss_ru
+                    + self.lam_rv_val * loss_rv
+                    + self.lam_div_val * loss_rdiv
+                )
             # Backward and optimize
             self.optimizer_Adam.zero_grad()
             loss.backward()
@@ -574,34 +587,43 @@ class PINN:
                         J_ics = self.compute_jacobian(ic_ntk_pred, params)
 
                     J_bc = self.compute_jacobian(bc_ntk_pred, params)
-                    J_ru = self.compute_jacobian(res_ntk_u, params)
-                    J_rv = self.compute_jacobian(res_ntk_v, params)
-                    j_rdiv = self.compute_jacobian(res_ntkdiv, params)
+
+                    if rpde_bool:
+                        J_ru = self.compute_jacobian(res_ntk_u, params)
+                        J_rv = self.compute_jacobian(res_ntk_v, params)
+                        j_rdiv = self.compute_jacobian(res_ntkdiv, params)
 
                     # Neural tangent kernels of the neural networks / Trace values
                     if ics_bool:
                         K_ic_value = self.compute_ntk(J_ics, self.D2, J_ics, self.D2)
                     K_bc_value = self.compute_ntk(J_bc, self.D1, J_bc, self.D1)
-                    K_ru_value = self.compute_ntk(J_ru, self.D3, J_ru, self.D3)
-                    K_rv_value = self.compute_ntk(J_rv, self.D3, J_rv, self.D3)
-                    K_div_value = self.compute_ntk(j_rdiv, self.D3, j_rdiv, self.D3)
+
+                    if rpde_bool:
+                        K_ru_value = self.compute_ntk(J_ru, self.D3, J_ru, self.D3)
+                        K_rv_value = self.compute_ntk(J_rv, self.D3, J_rv, self.D3)
+                        K_div_value = self.compute_ntk(j_rdiv, self.D3, j_rdiv, self.D3)
 
                     # Convert tensor to numpy array
                     if ics_bool:
                         K_ic_value = K_ic_value.detach().cpu().numpy()
                     K_bc_value = K_bc_value.detach().cpu().numpy()
-                    K_ru_value = K_ru_value.detach().cpu().numpy()
-                    K_rv_value = K_rv_value.detach().cpu().numpy()
-                    K_div_value = K_div_value.detach().cpu().numpy()
 
-                    trace_K = (
-                        np.trace(K_bc_value)
-                        + np.trace(K_ru_value)
-                        + np.trace(K_rv_value)
-                        + np.trace(K_div_value)
-                    )
+                    if rpde_bool:
+                        K_ru_value = K_ru_value.detach().cpu().numpy()
+                        K_rv_value = K_rv_value.detach().cpu().numpy()
+                        K_div_value = K_div_value.detach().cpu().numpy()
+
+                    trace_K = np.trace(K_bc_value)
+
                     if ics_bool:
                         trace_K += np.trace(K_ic_value)
+
+                    if rpde_bool:
+                        trace_K += (
+                            np.trace(K_ru_value)
+                            + np.trace(K_rv_value)
+                            + np.trace(K_div_value)
+                        )
 
                     # Store Trace values
                     self.K_bc_log.append(K_bc_value)
@@ -612,9 +634,12 @@ class PINN:
 
                     if update_lam:
                         self.lam_bc_val = trace_K / np.trace(K_bc_value)
-                        self.lam_ru_val = trace_K / np.trace(K_ru_value)
-                        self.lam_rv_val = trace_K / np.trace(K_rv_value)
-                        self.lam_div_val = trace_K / np.trace(K_div_value)
+
+                        if rpde_bool:
+                            self.lam_ru_val = trace_K / np.trace(K_ru_value)
+                            self.lam_rv_val = trace_K / np.trace(K_rv_value)
+                            self.lam_div_val = trace_K / np.trace(K_div_value)
+
                         if ics_bool:
                             self.lam_ic_val = trace_K / np.trace(K_ic_value)
 
@@ -810,25 +835,6 @@ res_sampler = Sampler(
 
 
 # PINN model
-
-
-# t_lb, t_ub = 0, 1
-# x_lb, x_ub = 0, 2
-# y_lb, y_ub = 0, 2
-# coords = np.array([[t_lb, x_lb, y_lb], [t_ub, x_ub, y_ub]])
-
-# # Fix y=2 (index 2), and leave t and x free
-# bc_top_sampler = BCSampler(
-#     dim=3,
-#     coords=coords,
-#     func=your_bc_func,  # Function that takes (N,3) array and returns BC values
-#     fixed_dims=[2],     # Index of y in [t, x, y]
-#     fixed_values=[y_ub]
-# )
-
-# x_top, y_top = bc_top_sampler.sample(10)
-# print("Sampled BC points:\n", x_top)
-# print("BC values:\n", y_top)
 print(bc1_coord[0, 1], bc2_coord[0, 1], bc3_coord[0, 2], bc4_coord[0, 2])
 
 bc1_sampler = BCSampler(
@@ -879,15 +885,12 @@ bc4_sampler = BCSampler(
 #     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
 # )
 
-
-# bc1_sampler = Sampler(3, bc1_coord, get_left_bc_from_history, name='BC1')
-# bc2_sampler = Sampler(3, bc2_coord, get_right_bc_from_history, name='BC2')
-# bc3_sampler = Sampler(3, bc3_coord, get_top_bc_from_history, name='BC3')
-# bc4_sampler = Sampler(3, bc4_coord, get_bottom_bc_from_history, name='BC4')
 bcs_sampler = [bc1_sampler, bc2_sampler, bc3_sampler, bc4_sampler]
 ics_sampler = Sampler(
     3, ics_coord, lambda x: np.hstack([u(x, nu), v(x, nu)]), name="ICs"
 )
+# ics_sampler = Sampler(3, ics_coord, interpolate_ic, name="ICs")
+# ics_sampler = Sampler(3, ics_coord, navier2d.interpolate_ic_from_snapshots, name="ICs")
 
 model = PINN(layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size)
 
@@ -895,6 +898,8 @@ model = PINN(layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel
 def main():
     navier2d.setupNS2d()
     navier2d.mainNS2d()
+    navier2d.writeSnapshots()
+
     train_bool = True
     # train
     if train_bool:
@@ -1010,114 +1015,120 @@ def animate_plot_2d():
     return ani
 
 
-if __name__ == "__main__":
+def errors():
+    import matplotlib.animation as animation
 
-    def errors():
-        import matplotlib.animation as animation
+    # 1) Load model
+    model = PINN(
+        layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size
+    )
+    model.nn.load_state_dict(torch.load(save_model))
 
-        # 1) Load model
-        model = PINN(
-            layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size
-        )
-        model.nn.load_state_dict(torch.load(save_model))
+    # 2) Build evaluation grid (2D x-y, loop in time)
+    Nx, Ny, Nt = dim, dim, 50
+    t_lin = np.linspace(dom_coord[0, 0], dom_coord[1, 0], Nt)
+    x_lin = np.linspace(x_lb, x_ub, Nx)
+    y_lin = np.linspace(ylb, yub, Ny)
+    X, Y = np.meshgrid(x_lin, y_lin)  # both shape (Ny, Nx)
 
-        # 2) Build evaluation grid (2D x-y, loop in time)
-        Nx, Ny, Nt = 300, 300, 100
-        t_lin = np.linspace(dom_coord[0, 0], dom_coord[1, 0], Nt)
-        x_lin = np.linspace(x_lb, x_ub, Nx)
-        y_lin = np.linspace(ylb, yub, Ny)
-        X, Y = np.meshgrid(x_lin, y_lin)  # both shape (Ny, Nx)
+    # 3) Prepare storage for |velocity| frames
+    U_frames = []
 
-        # 3) Prepare storage for |velocity| frames
-        U_frames = []
+    with torch.no_grad():
+        tot_frame = 0
+        for t_val in t_lin:
 
-        with torch.no_grad():
-            tot_frame = 0
-            for t_val in t_lin:
+            if t_val >= 0.0:  # modifica qui a seconda di quanti frame vuoi visualizzare
+                pts = np.column_stack([np.full(X.size, t_val), X.ravel(), Y.ravel()])
+                u_pred, v_pred, _ = model.predict_uvp(pts)
+                u_pred = u_pred.reshape(Ny, Nx)
+                v_pred = v_pred.reshape(Ny, Nx)
+                mag = np.sqrt(u_pred**2 + v_pred**2)
+                U_frames.append(mag)
+                tot_frame += 1
 
-                if t_val >= 0.0:
-                    pts = np.column_stack(
-                        [np.full(X.size, t_val), X.ravel(), Y.ravel()]
-                    )
-                    u_pred, v_pred, _ = model.predict_uvp(pts)
-                    u_pred = u_pred.reshape(Ny, Nx)
-                    v_pred = v_pred.reshape(Ny, Nx)
-                    mag = np.sqrt(u_pred**2 + v_pred**2)
-                    U_frames.append(mag)
-                    tot_frame += 1
-        # 4) Load CFD data
-        dim = 300
-        data = np.loadtxt("snapshots.txt", delimiter=",")
-        N_space, M_times = data.shape
-        print("N_space:", N_space, "M_times:", M_times)
-        ux = data[: dim * dim, :]
-        uy = data[dim * dim : 2 * dim * dim, :]
-        ux_2d = ux.reshape(dim, dim, M_times)
-        uy_2d = uy.reshape(dim, dim, M_times)
-        umag = np.sqrt(ux_2d**2 + uy_2d**2)
-        # Supponiamo:
-        # - CFD: umag.shape = (dim, dim, M_times)
-        # - PINN: U_frames è una lista di array (Ny, Nx), lunghezza = Nt
-        # Bisogna quindi uniformare la shape (Nx, Ny, Nt) per entrambi
+    # 4) Load CFD data
 
-        umag = np.array(umag)  # CFD: shape (dim, dim, M_times)
-        U_frames = np.array(U_frames)  # PINN: shape (Nt, Ny, Nx)
-        U_frames = np.transpose(U_frames, (1, 2, 0))  # now (Ny, Nx, Nt) se necessario
-        # Controlla dimensioni!
-        print("CFD shape:", umag.shape, "PINN shape:", U_frames.shape)
+    data = np.loadtxt("snapshots.txt", delimiter=",")
+    N_space, M_times = data.shape
+    print("N_space:", N_space, "M_times:", M_times)
+    ux = data[: dim * dim, :]
+    uy = data[dim * dim : 2 * dim * dim, :]
+    ux_2d = ux.reshape(dim, dim, M_times)
+    uy_2d = uy.reshape(dim, dim, M_times)
 
-        # (Se necessario, ridimensiona/interpola uno dei due dataset!)
+    # animation of the same ICs
+    # for t in range(M_times):
+    #     ux_2d[:, :, t] = ux_2d[:, :, 2]
+    #     uy_2d[:, :, t] = uy_2d[:, :, 2]
+    umag = np.sqrt(ux_2d**2 + uy_2d**2)
 
-        # Calcolo errore L2 frame by frame
-        errors = []
+    # Supponiamo:
+    # - CFD: umag.shape = (dim, dim, M_times)
+    # - PINN: U_frames è una lista di array (Ny, Nx), lunghezza = Nt
+    # Bisogna quindi uniformare la shape (Nx, Ny, Nt) per entrambi
+
+    umag = np.array(umag)  # CFD: shape (dim, dim, M_times)
+    U_frames = np.array(U_frames)  # PINN: shape (Nt, Ny, Nx)
+    U_frames = np.transpose(U_frames, (1, 2, 0))  # now (Ny, Nx, Nt) se necessario
+    # Controlla dimensioni!
+    print("CFD shape:", umag.shape, "PINN shape:", U_frames.shape)
+
+    # (Se necessario, ridimensiona/interpola uno dei due dataset!)
+
+    # Calcolo errore L2 frame by frame
+    errors = []
+    for t in range(min(U_frames.shape[2], umag.shape[2])):
+        u_pinn = U_frames[..., t]
+        u_cfd = umag[..., t]
+        err = np.sqrt(np.mean((u_pinn - u_cfd) ** 2))  # L2 globale
+        errors.append(err)
+
+    # Plot errore temporale
+    import matplotlib.pyplot as plt
+
+    plt.figure()
+    plt.plot(errors)
+    plt.xlabel("Time frame")
+    plt.ylabel("RMS Error")
+    plt.title("RMS Error PINN vs CFD")
+    plt.grid(True)
+    plt.show()
+
+    def animation_err():
+        # Assumiamo che le griglie coincidano (stesse Nx, Ny, Nt, dim)
+        diff_frames = []
         for t in range(min(U_frames.shape[2], umag.shape[2])):
             u_pinn = U_frames[..., t]
             u_cfd = umag[..., t]
-            err = np.sqrt(np.mean((u_pinn - u_cfd) ** 2))  # L2 globale
-            errors.append(err)
+            diff = u_pinn - u_cfd
+            # diff = u_cfd  # plotta solo i la IC della CFD
+            diff_frames.append(diff)
+        diff_frames = np.array(diff_frames)  # shape (Nt, Ny, Nx) o (Nt, dim, dim)
 
-        # Plot errore temporale
-        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(6, 5))
+        vmax = np.max(np.abs(diff_frames))
+        im = ax.imshow(
+            diff_frames[0], origin="lower", cmap="seismic", vmin=-vmax, vmax=vmax
+        )
 
-        plt.figure()
-        plt.plot(errors)
-        plt.xlabel("Time frame")
-        plt.ylabel("RMS Error")
-        plt.title("RMS Error PINN vs CFD")
-        plt.grid(True)
+        ax.set_title(f"Difference (PINN - CFD), frame 0")
+        fig.colorbar(im, ax=ax, label="Difference")
+
+        def update(frame):
+            im.set_data(diff_frames[frame])
+            ax.set_title(f"Difference (PINN - CFD), frame {frame}")
+            return [im]
+
+        ani = animation.FuncAnimation(
+            fig, update, frames=diff_frames.shape[0], interval=50, blit=True
+        )
         plt.show()
 
-        def animation_err():
-            # Assumiamo che le griglie coincidano (stesse Nx, Ny, Nt, dim)
-            diff_frames = []
-            for t in range(min(U_frames.shape[2], umag.shape[2])):
-                u_pinn = U_frames[..., t]
-                u_cfd = umag[..., t]
-                diff = u_pinn - u_cfd
-                diff_frames.append(diff)
-            diff_frames = np.array(diff_frames)  # shape (Nt, Ny, Nx) o (Nt, dim, dim)
+    animation_err()
 
-            import matplotlib.animation as animation
 
-            fig, ax = plt.subplots(figsize=(6, 5))
-            vmax = np.max(np.abs(diff_frames))
-            im = ax.imshow(
-                diff_frames[0], origin="lower", cmap="seismic", vmin=-vmax, vmax=vmax
-            )
-            ax.set_title(f"Difference (PINN - CFD), frame 0")
-            fig.colorbar(im, ax=ax, label="Difference")
-
-            def update(frame):
-                im.set_data(diff_frames[frame])
-                ax.set_title(f"Difference (PINN - CFD), frame {frame}")
-                return [im]
-
-            ani = animation.FuncAnimation(
-                fig, update, frames=diff_frames.shape[0], interval=50, blit=True
-            )
-            plt.show()
-
-        animation_err()
+if __name__ == "__main__":
 
     # print bcs
     # print(bc1_sampler)

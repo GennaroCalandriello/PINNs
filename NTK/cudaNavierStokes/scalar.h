@@ -15,8 +15,8 @@
 #define CLAMP(x) ((x < 0.0f) ? 0.0f : ((x > 1.0f) ? 1.0f : x))
 
 #define VEL 1
-#define TIMESTEP 0.001
-#define DIM 300
+#define TIMESTEP 0.005
+#define DIM 200
 #define RES DIM
 
 #define RADIUS (DIM * DIM)
