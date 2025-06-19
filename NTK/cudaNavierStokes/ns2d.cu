@@ -12,7 +12,7 @@ namespace py = pybind11;
 int framecount = 0;
 float t_current = 0;
 float eps = 0.0f; // per le condizioni al contorno
-int shift =10;    // shift delle BC verso l'interno o l'esterno
+int shift =1;    // shift delle BC verso l'interno o l'esterno
 
 Vector2f *u, *dev_u;
 float *p, *c, *dev_p, *dev_c;
@@ -300,41 +300,38 @@ std::vector<std::array<float, 4>> get_ic_from_snapshots() {
 }
 
 py::array_t<float> interpolate_ic_from_snapshots(py::array_t<float, py::array::c_style | py::array::forcecast> query) {
-  // query: shape (N, 2) (x, y)
+  // query: shape (N, 3) (t, x, y)
   if (snapshots.empty())
       throw std::runtime_error("Snapshots vector is empty!");
-  const std::vector<float>& first_snapshot = snapshots[0];
+  const std::vector<float>& first_snapshot = snapshots[50];
   if (first_snapshot.size() != 2 * dim * dim)
       throw std::runtime_error("First snapshot size mismatch.");
-  printf("shape of first snapshot: %zu\n", first_snapshot.size());
-  // float *ux_grid;
-  // float* uy_grid ;
+  // printf("shape of first snapshot: %zu\n", first_snapshot.size());
+
   std::vector<float> ux_grid(dim * dim);
   std::vector<float> uy_grid(dim * dim);
   for (int i = 0; i < dim; i++) {
       for (int j = 0; j < dim; j++) {
-          int idx = i * dim + j;
-          ux_grid[idx] = first_snapshot[idx];             // primi dim*dim sono ux
-          uy_grid[idx] = first_snapshot[idx + dim*dim];   // dopo ci sono gli uy
+          int idx = IND(i, j, dim);
+          ux_grid[idx] = first_snapshot[idx];
+          uy_grid[idx] = first_snapshot[idx + dim*dim];
       }
-    }
-    // float dx = (x_max - x_min) / (dim - 1);
-    // float dy = (y_max - y_min) / (dim - 1);
+  }
 
-    auto buf = query.request();
-  if (buf.ndim != 2 || buf.shape[1] < 2)
-      throw std::runtime_error("Input shape must be (N, 2+)");
+  auto buf = query.request();
+  if (buf.ndim != 2 || buf.shape[1] < 3)  // <-- Accept (N, 3) or more
+      throw std::runtime_error("Input shape must be (N, 3+)");
 
   int N = buf.shape[0];
   auto ptr = static_cast<const float*>(buf.ptr);
 
-  // Crea output (N, 2)
   py::array_t<float> result({N, 2});
   auto r = result.mutable_unchecked<2>();
 
   for (int n = 0; n < N; ++n) {
-      float x = ptr[n * buf.shape[1]];
-      float y = ptr[n * buf.shape[1] + 1];
+      // float t = ptr[n * buf.shape[1]]; // If you want to use t in the future
+      float x = ptr[n * buf.shape[1] + 1];
+      float y = ptr[n * buf.shape[1] + 2];
 
       int ix = static_cast<int>((x - x_min) / dx);
       int iy = static_cast<int>((y - y_min) / dy);
@@ -342,28 +339,15 @@ py::array_t<float> interpolate_ic_from_snapshots(py::array_t<float, py::array::c
       ix = std::min(std::max(ix, 0), static_cast<int>(dim) - 2);
       iy = std::min(std::max(iy, 0), static_cast<int>(dim) - 2);
 
-
       float x1 = x_min + ix * dx;
       float y1 = y_min + iy * dy;
       float fx = (x - x1) / dx;
       float fy = (y - y1) / dy;
 
-      // int idx11 = ix * dim + iy;
-      // int idx12 = ix * dim + (iy + 1);
-      // int idx21 = (ix + 1) * dim + iy;
-      // int idx22 = (ix + 1) * dim + (iy + 1);
-      // x = x_min + ix * dx
-// y = y_min + iy * dy
-      int idx11 = ix * dim + iy;         // (ix, iy)
-      int idx12 = ix * dim + (iy + 1);   // (ix, iy+1)
-      int idx21 = (ix + 1) * dim + iy;   // (ix+1, iy)
-      int idx22 = (ix + 1) * dim + (iy + 1); // (ix+1, iy+1)
-
-
-      // int idx11 = iy * dim + ix; // scambia x e y!
-      // int idx12 = (ix + 1) * dim + iy;
-      // int idx21 = ix * dim + (iy + 1);
-      // int idx22 = (iy + 1) * dim + (ix + 1);
+      int idx11 = ix * dim + iy;
+      int idx12 = ix * dim + (iy + 1);
+      int idx21 = (ix + 1) * dim + iy;
+      int idx22 = (ix + 1) * dim + (iy + 1);
 
       float ux_val = (1-fx)*(1-fy)*ux_grid[idx11]
                    + (1-fx)*fy*ux_grid[idx12]

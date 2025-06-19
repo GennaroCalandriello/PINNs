@@ -16,7 +16,7 @@
 
 #define VEL 1
 #define TIMESTEP 0.005
-#define DIM 200
+#define DIM 300
 #define RES DIM
 
 #define RADIUS (DIM * DIM)

@@ -469,6 +469,10 @@ class PINN:
             loss_bc4_u = self.normalize_loss(u_pred_bc4, uv_bc4_batch_tens[:, 0:1])
             loss_bc4_v = self.normalize_loss(v_pred_bc4, uv_bc4_batch_tens[:, 1:2])
 
+            loss_bcs_ic = torch.mean(
+                (uv_ics_batch_tens[:, 0:1] - u_pred_ics) ** 2
+                + (uv_ics_batch_tens[:, 1:2] - v_pred_ics) ** 2
+            )
             loss_bcs = (
                 loss_bc1_u
                 + loss_bc1_v
@@ -477,7 +481,8 @@ class PINN:
                 + loss_bc3_u
                 + loss_bc3_v
                 + loss_bc4_u
-                + loss_bc4_v
+                + loss_bcs_ic
+                + +loss_bc4_v
             )
 
             loss = (
@@ -818,53 +823,53 @@ res_sampler = Sampler(
 # print("BC values:\n", y_top)
 print(bc1_coord[0, 1], bc2_coord[0, 1], bc3_coord[0, 2], bc4_coord[0, 2])
 
-bc1_sampler = BCSampler(
-    3,
-    bc1_coord,
-    get_left_bc_from_history,
-    fixed_dims=[1],
-    fixed_values=[x_lb],
-    name="BC1",
-)
-bc2_sampler = BCSampler(
-    3,
-    bc2_coord,
-    get_right_bc_from_history,
-    fixed_dims=[1],
-    fixed_values=[x_ub],
-    name="BC2",
-)
-bc3_sampler = BCSampler(
-    3,
-    bc3_coord,
-    get_top_bc_from_history,
-    fixed_dims=[2],
-    fixed_values=[yub],
-    name="BC3",
-)
-bc4_sampler = BCSampler(
-    3,
-    bc4_coord,
-    get_bottom_bc_from_history,
-    fixed_dims=[2],
-    fixed_values=[ylb],
-    name="BC4",
-)
+# bc1_sampler = BCSampler(
+#     3,
+#     bc1_coord,
+#     get_left_bc_from_history,
+#     fixed_dims=[1],
+#     fixed_values=[x_lb],
+#     name="BC1",
+# )
+# bc2_sampler = BCSampler(
+#     3,
+#     bc2_coord,
+#     get_right_bc_from_history,
+#     fixed_dims=[1],
+#     fixed_values=[x_ub],
+#     name="BC2",
+# )
+# bc3_sampler = BCSampler(
+#     3,
+#     bc3_coord,
+#     get_top_bc_from_history,
+#     fixed_dims=[2],
+#     fixed_values=[yub],
+#     name="BC3",
+# )
+# bc4_sampler = BCSampler(
+#     3,
+#     bc4_coord,
+#     get_bottom_bc_from_history,
+#     fixed_dims=[2],
+#     fixed_values=[ylb],
+#     name="BC4",
+# )
 
 # zero_bc = lambda x: np.zeros((x.shape[0], 2))
 # bc_cyl_sampler = Sampler()
-# bc1_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
-# bc2_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
-# bc3_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
-# bc4_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
+bc1_sampler = Sampler(
+    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+)
+bc2_sampler = Sampler(
+    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+)
+bc3_sampler = Sampler(
+    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+)
+bc4_sampler = Sampler(
+    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
+)
 
 
 # bc1_sampler = Sampler(3, bc1_coord, get_left_bc_from_history, name='BC1')

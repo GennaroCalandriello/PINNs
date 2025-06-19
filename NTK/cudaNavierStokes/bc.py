@@ -251,37 +251,29 @@ def interpolate_ic(points):
 
 
 if __name__ == "__main__":
+
     navier2d.setupNS2d()
     navier2d.mainNS2d()
-    x = np.random.rand(10000, 3) * np.array(
+
+    x = np.random.rand(40000, 3) * np.array(
         [1.0, x_max - x_min, y_max - y_min]
     ) + np.array(
         [0.0, x_min, y_min]
     )  # batch di punti (N, 3) [t, x, y]
     # ic = interpolate_ic(x)
     ic = navier2d.interpolate_ic_from_snapshots(x)
+    # ic = navier2d.interpolate_ic_from_snapshots(x[:, 1:3])  # pass (x, y)
 
     # Plot ux and uy as scatter colormaps
-    fig, axs = plt.subplots(1, 3, figsize=(12, 5))
-    sc0 = axs[0].scatter(x[:, 1], x[:, 2], c=ic[:, 0], cmap="viridis")
-    axs[0].set_title("ux")
-    axs[0].set_xlabel("x")
-    axs[0].set_ylabel("y")
-    plt.colorbar(sc0, ax=axs[0])
+    fig, axs = plt.subplots(1, 1, figsize=(8, 8))
 
-    sc1 = axs[1].scatter(x[:, 1], x[:, 2], c=ic[:, 1], cmap="viridis")
-    axs[1].set_title("uy")
-    axs[1].set_xlabel("x")
-    axs[1].set_ylabel("y")
-    plt.colorbar(sc1, ax=axs[1])
-
-    sc2 = axs[2].scatter(
+    sc2 = axs.scatter(
         x[:, 1], x[:, 2], c=np.sqrt(ic[:, 1] ** 2 + ic[:, 0] ** 2), cmap="viridis"
     )
-    axs[2].set_title("uy")
-    axs[2].set_xlabel("x")
-    axs[2].set_ylabel("y")
-    plt.colorbar(sc2, ax=axs[2])
+    axs.set_title("uy")
+    axs.set_xlabel("x")
+    axs.set_ylabel("y")
+    plt.colorbar(sc2, ax=axs)
 
     plt.tight_layout()
     plt.show()

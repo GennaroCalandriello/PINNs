@@ -2,11 +2,13 @@ from hyperpar import *
 from bc import *
 import matplotlib.animation as animation
 
-ics_bool = True
+ics_bool = False
 rpde_bool = True  # Residuals PDE
 
-batch_ratio_bc = 3
-batch_ratio_ic = 2
+batch_ratio_bc = 4  # divide
+batch_ratio_ic = 4  # divide
+batch_res = 10  # moltiplica
+
 dim = navier2d.dim
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"  # Avoids KMP duplicate lib error
 
@@ -43,13 +45,22 @@ class Sampler:
         self.func = func
         self.name = name
 
+    # def sample(self, N):
+
+    #     x = self.coords[0:1, :] + (
+    #         self.coords[1:2, :] - self.coords[0:1, :]
+    #     ) * np.random.rand(N, self.dim)
+    #     y = self.func(x)
+
+    #     return x, y
+
     def sample(self, N):
-
-        x = self.coords[0:1, :] + (
-            self.coords[1:2, :] - self.coords[0:1, :]
-        ) * np.random.rand(N, self.dim)
+        mean = 0.5 * (self.coords[0, :] + self.coords[1, :])
+        std = 0.25 * (self.coords[1, :] - self.coords[0, :])
+        x = mean + std * np.random.randn(N, self.dim)
+        for d in range(self.dim):
+            x[:, d] = np.clip(x[:, d], self.coords[0, d], self.coords[1, d])
         y = self.func(x)
-
         return x, y
 
 
@@ -146,16 +157,16 @@ class NeuralNet(nn.Module):
 
         u = u_ic + t * out[:, 0:1]
         v = v_ic + t * out[:, 1:2]
-        # u = out[:, 0:1]
-        # v = out[:, 1:2]
+        u = out[:, 0:1]
+        v = out[:, 1:2]
 
-        u[-1] = 0
-        v[-1] = 0
-        u[0] = 0
-        v[0] = 0
+        # u[-1] = 0
+        # v[-1] = 0
+        # u[0] = 0
+        # v[0] = 0
 
         # p = (1-torch.exp(-0.5*t))*out[:, 2:3]
-        p = out[:, 2:3]  # Non imposto p_ic, ma lo lascio libero
+        p = p_ic + t * out[:, 2:3]  # Non imposto p_ic, ma lo lascio libero
 
         return torch.cat([u, v, p], dim=1)  # (batch, 2)
 
@@ -187,9 +198,9 @@ class PINN:
         self.lam_ic_val = (
             torch.tensor(100.0).float().to(device)
         )  # for initial conditions
-        self.lam_ru_val = torch.tensor(1.0).float().to(device)  # for residuals u
-        self.lam_rv_val = torch.tensor(1.0).float().to(device)  # for residuals v
-        self.lam_div_val = torch.tensor(10.0).float().to(device)  # for divergence
+        self.lam_ru_val = torch.tensor(10.0).float().to(device)  # for residuals u
+        self.lam_rv_val = torch.tensor(10.0).float().to(device)  # for residuals v
+        self.lam_div_val = torch.tensor(100.0).float().to(device)  # for divergence
         # ====================================================================================================================================
         # Wave constant
         self.nu = torch.tensor(nu).float().to(device)
@@ -372,7 +383,7 @@ class PINN:
                 print(f"Iteration {it}/{nIter}")
 
             X_ics_batch, uv_ics_batch = self.fetch_minibatch(
-                self.ics_sampler, batch_size
+                self.ics_sampler, batch_size // batch_ratio_ic
             )
             X_bc1_batch, uv_bc1_batch = self.fetch_minibatch(
                 self.bcs_sampler[0], batch_size // batch_ratio_bc
@@ -455,7 +466,9 @@ class PINN:
 
             # PDE residuals
             # Fetch residual mini-batch
-            X_res_batch, _ = self.fetch_minibatch(self.res_sampler, batch_size * 2)
+            X_res_batch, _ = self.fetch_minibatch(
+                self.res_sampler, batch_size * batch_res
+            )
             X_res_batch_tens = (
                 torch.tensor(X_res_batch, requires_grad=True).float().to(device)
             )
@@ -485,6 +498,10 @@ class PINN:
             loss_bc4_u = self.normalize_loss(u_pred_bc4, uv_bc4_batch_tens[:, 0:1])
             loss_bc4_v = self.normalize_loss(v_pred_bc4, uv_bc4_batch_tens[:, 1:2])
 
+            loss_bcs_ic = torch.mean(
+                (uv_ics_batch_tens[:, 0:1] - u_pred_ics) ** 2
+            ) + torch.mean(+((uv_ics_batch_tens[:, 1:2] - v_pred_ics) ** 2))
+
             loss_bcs = (
                 loss_bc1_u
                 + loss_bc1_v
@@ -495,14 +512,17 @@ class PINN:
                 + loss_bc4_u
                 + loss_bc4_v
             )
+            N_b = batch_size // batch_ratio_bc
+            N_ic = batch_size // batch_ratio_ic
+            N_res = batch_size * batch_res
 
-            loss = self.lam_bc_val * loss_bcs
+            loss = (1 / N_b) * self.lam_bc_val * loss_bcs
 
             if ics_bool:
-                loss += self.lam_ic_val * loss_ic
+                loss += (1 / N_ic) * self.lam_ic_val * loss_ic
 
             if rpde_bool:
-                loss += (
+                loss += (1 / N_res) * (
                     self.lam_ru_val * loss_ru
                     + self.lam_rv_val * loss_rv
                     + self.lam_div_val * loss_rdiv
@@ -829,13 +849,9 @@ def operator(u, v, p, t, x, y, nu, sigma_t=1.0, sigma_x=1.0, sigma_y=1.0):
 
 zero_bc = lambda x: np.zeros((x.shape[0], 2))
 
-res_sampler = Sampler(
-    3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-)
-
 
 # PINN model
-print(bc1_coord[0, 1], bc2_coord[0, 1], bc3_coord[0, 2], bc4_coord[0, 2])
+# print(bc1_coord[0, 1], bc2_coord[0, 1], bc3_coord[0, 2], bc4_coord[0, 2])
 
 bc1_sampler = BCSampler(
     3,
@@ -870,26 +886,17 @@ bc4_sampler = BCSampler(
     name="BC4",
 )
 
-# zero_bc = lambda x: np.zeros((x.shape[0], 2))
-# bc_cyl_sampler = Sampler()
-# bc1_sampler = Sampler(
+# res_sampler = Sampler(
 #     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
 # )
-# bc2_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
-# bc3_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
-# bc4_sampler = Sampler(
-#     3, dom_coord, lambda x: np.zeros((x.shape[0], 2)), name="Residuals"
-# )
+res_sampler = Sampler(
+    3, dom_coord, lambda x: 0.1 * np.random.randn(x.shape[0], 2), name="Residuals"
+)
 
 bcs_sampler = [bc1_sampler, bc2_sampler, bc3_sampler, bc4_sampler]
 ics_sampler = Sampler(
     3, ics_coord, lambda x: np.hstack([u(x, nu), v(x, nu)]), name="ICs"
 )
-# ics_sampler = Sampler(3, ics_coord, interpolate_ic, name="ICs")
 # ics_sampler = Sampler(3, ics_coord, navier2d.interpolate_ic_from_snapshots, name="ICs")
 
 model = PINN(layers, operator, ics_sampler, bcs_sampler, res_sampler, nu, kernel_size)
@@ -1025,7 +1032,7 @@ def errors():
     model.nn.load_state_dict(torch.load(save_model))
 
     # 2) Build evaluation grid (2D x-y, loop in time)
-    Nx, Ny, Nt = dim, dim, 50
+    Nx, Ny, Nt = dim, dim, 100
     t_lin = np.linspace(dom_coord[0, 0], dom_coord[1, 0], Nt)
     x_lin = np.linspace(x_lb, x_ub, Nx)
     y_lin = np.linspace(ylb, yub, Ny)
