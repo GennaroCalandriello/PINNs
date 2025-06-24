@@ -19,7 +19,7 @@ os.makedirs("losses", exist_ok=True)
 
 save_model = "models/pinn_ns2d.pth"
 save_loss = "losses/pinn_loss_ns2d.npy"
-use_only_first_layer_NTK = False  # If True, NTK acts only on the first layer of NN, if you want to use all layers, ensure that the
+use_only_first_layer_NTK = True  # If True, NTK acts only on the first layer of NN, if you want to use all layers, ensure that the
 # number of layers is about 30-40, for 500 neurons you should allocate ~1Tb on GPU!!!!!
 
 log_NTK = True
@@ -37,17 +37,17 @@ t_ub = 1.0
 nu = 0.01  # Wave constant
 import numpy as np
 
-start = 60
-end = 30
-n = 100
+start = 400
+end = 200
+n = 10
 
-arr = start * (end / start) ** (np.linspace(0, 1, n))
-arr = arr.astype(int)
-arr = arr.tolist()
-layers = (
-    [3] + arr + [3]
-)  # 3 input features, hidden layers decaying exponentially, 3 output features
-
+# arr = start * (end / start) ** (np.linspace(0, 1, n))
+# arr = arr.astype(int)
+# arr = arr.tolist()
+# layers = (
+#     [3] + arr + [3]
+# )  # 3 input features, hidden layers decaying exponentially, 3 output features
+layers = [3, 500, 500, 3]
 # layers = [
 #     3,
 #     450,
@@ -62,8 +62,8 @@ layers = (
 #     3,
 # ]  # Numerosi articoli usano pochi hidden layers, con 30-50 neuroni, che è la dimensione ideale per un kernel gradient
 # descent performabile su tutti i layers. MA, se non metto almento 400-500 neuroni per layer, la rete è pessima.
-kernel_size = 30
-iterations = 20000  # epochs
+kernel_size = 10
+iterations = 5000  # epochs
 
 scheduler_step = 3000  # Number of steps to update the learning rate
 ntk_step = 100  # Number of steps to compute the NTK matrix

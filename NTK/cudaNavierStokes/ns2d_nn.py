@@ -157,8 +157,8 @@ class NeuralNet(nn.Module):
 
         u = u_ic + t * out[:, 0:1]
         v = v_ic + t * out[:, 1:2]
-        u = out[:, 0:1]
-        v = out[:, 1:2]
+        # u = out[:, 0:1]
+        # v = out[:, 1:2]
 
         # u[-1] = 0
         # v[-1] = 0
