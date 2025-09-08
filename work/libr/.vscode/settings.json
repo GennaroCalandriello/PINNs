@@ -1,0 +1,8 @@
+{
+    "workbench.colorCustomizations": {
+        "activityBar.background": "#14332B",
+        "titleBar.activeBackground": "#1C473C",
+        "titleBar.activeForeground": "#F7FCFB"
+    },
+    "cmake.ignoreCMakeListsMissing": true
+}

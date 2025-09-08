@@ -1,0 +1,19 @@
+{
+  // Formatter di default per Python
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  },
+  // Formatter di default per C++
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  // Formatter di default per CUDA
+  "[cuda-cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  // Format on Save per tutto
+  "editor.formatOnSave": true,
+  // Opzioni clang-format per C++/CUDA
+  "C_Cpp.clang_format_fallbackStyle": "Google",
+  "C_Cpp.clang_format_path": "C:/Users/vanho/Desktop/Work/llvmclang/bin/clang-format.exe"
+}
