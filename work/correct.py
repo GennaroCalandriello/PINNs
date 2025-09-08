@@ -17,21 +17,24 @@ from ns_GNN_KF import (
     geometryObject,
 )
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # ====== Hyperparameters (adjust to your GPU) ======
 HIDDEN = 64
 LATENT = 32
 EDGE_HIDDEN = 64
 NUM_ENCODER_BLOCKS = 3  # pooling depth; 3 => ~1/8 nodes if ratio=0.5 each
-POOL_RATIO = 0.5  # keep top 50% nodes at each stage
+POOL_RATIO = 0.6  # keep top 50% nodes at each stage
 DROP = 0.1
 LR = 2e-3
-EPOCHS = 300
-BATCH_SIZE_NODES = 4096  # NeighborLoader target nodes per batch
+EPOCHS = 500
+BATCH_SIZE_NODES = 6000  # NeighborLoader target nodes per batch
 NEIGHBORS = [20, 15, 10]  # fanouts per hop
 GRAD_CLIP = 1.0
 USE_AMP = True  # mixed precision
 USE_COMPILE = False  # torch.compile for fused kernels
-SCHEDULER_STEP = 50  # epochs per step of lr scheduler
+SCHEDULER_STEP = 200  # epochs per step of lr scheduler
+SELF_LOOP = False
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,21 +49,44 @@ class EdgeGNNLayer(MessagePassing):
         super().__init__(aggr=aggr, node_dim=0)
         self.mlp_msg = nn.Sequential(
             nn.Linear(2 * in_ch + edge_dim, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
             nn.Linear(hidden, out_ch),
         )
         self.mlp_upd = nn.Sequential(
-            nn.Linear(in_ch + out_ch, hidden), nn.GELU(), nn.Linear(hidden, out_ch)
+            nn.Linear(in_ch + out_ch, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Linear(hidden, out_ch),
         )
+        # self.bn = nn.BatchNorm1d(out_ch)
         self.dropout = nn.Dropout(dropout)
-        self.bn = nn.BatchNorm1d(out_ch)
+        self.norm = nn.LayerNorm(out_ch)
 
     def forward(self, x, edge_index, edge_attr):
         x = self.dropout(x)
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr)  # shape: [N, out_ch]
+        # adding self-loops to the adjacency matrix ma non so cosa sia
+        if SELF_LOOP:
+            edge_index_sl, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+            if edge_attr is not None:
+                num_added = edge_index_sl.size(1) - edge_index.size(1)
+                if num_added > 0:
+                    pad = edge_attr.new_zeros((num_added, edge_attr.size(1)))
+                    edge_attr_sl = torch.cat([edge_attr, pad], dim=0)
+                else:
+                    edge_attr_sl = edge_attr
+            else:
+                edge_attr_sl = None
+        else:
+            edge_index_sl = edge_index
+            edge_attr_sl = edge_attr
+        out = self.propagate(
+            edge_index_sl, x=x, edge_attr=edge_attr_sl
+        )  # shape: [N, out_ch]
         h = torch.cat([x, out], dim=-1)
         h = self.mlp_upd(h)
-        h = self.bn(h)
+        # h = self.bn(h)
+        h = self.norm(h)
         return F.gelu(h)
 
     def message(self, x_i, x_j, edge_attr):
@@ -124,7 +150,7 @@ class GraphAutoEncoder(nn.Module):
         channels = hidden
         for _ in range(depth):
             encoderlist.append(Encoder(channels, channels, edge_dim=edge_dim))
-        self.enccoder = nn.ModuleList(encoderlist)
+        self.encoder = nn.ModuleList(encoderlist)
 
         # bottleneck
         self.bottleneck = EdgeGNNLayer(channels, latent, edge_dim)
@@ -197,20 +223,24 @@ def train(model, loader, epochs=EPOCHS, lr=LR, grad_clip=GRAD_CLIP, device="cuda
     model.train()
     for epoch in range(1, epochs + 1):
         total = 0
-        n = 0
+        n = 0  ## il problema è sulla loss, controlla!!!!
         for batch in loader:
+            # print("questo + bech", batch)
+            # print("dimensioni batch", batch.num_nodes)
             batch = batch.to(device)
 
             opt.zero_grad()
             amp_ctx = (
                 torch.autocast(device_type=device, enabled=USE_AMP)
-                if device.startswith("cuda")
+                if device == "cuda"
                 else nullcontext()
             )
             with amp_ctx:
                 out = model(batch)
-                target = batch.y
-                loss = F.mse_loss(out, target)
+                center = batch.n_id[: batch.batch_size]
+                out_center = out[: batch.batch_size]
+                target_center = batch.y[: batch.batch_size]
+                loss = F.mse_loss(out_center, target_center)
             scaler.scale(loss).backward()
             if grad_clip is not None:
                 scaler.unscale_(opt)
@@ -218,8 +248,27 @@ def train(model, loader, epochs=EPOCHS, lr=LR, grad_clip=GRAD_CLIP, device="cuda
             scaler.step(opt)
             scaler.update()
 
-            total += loss.item() * batch.num_graphs
-            n += batch.num_graphs
+            total += loss.item() * batch.num_nodes
+            n += batch.num_nodes
         scheduler.step()
-        print(f"Epoch {epoch:03d}, Loss: {total / n:.6f}")
+        if epoch % 10 == 0 or epoch == 1:
+            print(f"Epoch {epoch:03d}, Loss: {total / n:.6f}")
     return model
+
+
+def main():
+    # Load and preprocess data
+    data = createGraphData()
+    in_ch = data.x.size(-1)
+    edge_dim = data.edge_attr.size(-1)
+    out_ch = data.y.size(-1)
+
+    model = GraphAutoEncoder(in_ch=in_ch, edge_dim=edge_dim, out_ch=out_ch)
+    loader = GraphLoader(data)
+    trained_model = train(model, loader, device=device)
+    torch.save(trained_model.state_dict(), "model/gnn_ae.pth")
+    print("Model saved to model/gnn_ae.pth")
+
+
+if __name__ == "__main__":
+    main()

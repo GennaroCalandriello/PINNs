@@ -3,14 +3,14 @@ import matplotlib.pyplot as plt
 # from ns_GNN_KF import *
 # from ns_gnn_diffpool import *
 # from correct import *
-from workinghere import *
+from correct import *
 
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def animate_patch_time_series_gnn(
     out_gif="mehmeh.gif",
-    model_path="model/scalable_gnn_ae.pt",
+    model_path="model/gnn_ae.pth",
 ):
     radius = 3000
     import matplotlib.tri as mtri
@@ -29,13 +29,11 @@ def animate_patch_time_series_gnn(
     edge_dim = data.edge_attr.size(-1)
     out_ch = data.y.size(-1) if hasattr(data, "y") else 3
 
-    model = SparseUNetAutoEncoder(in_ch, edge_dim, out_ch=out_ch).to(device)
-    model.load_state_dict(torch.load(model_path))
+    model = GraphAutoEncoder(in_ch=in_ch, edge_dim=edge_dim, out_ch=out_ch).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     # --- Normalize data ---
 
-    # --- Set up device
-    device = xynorm.mean.device if hasattr(xynorm, "mean") else torch.device("cpu")
     # --- Initial geometry (for triangulation & masking) ---
     t0, centers0, U0, neighbors0, edge_index0 = results[0]
     centers0 = torch.tensor(centers0, dtype=torch.float32, device=device)
@@ -144,5 +142,4 @@ def animate_patch_time_series_gnn(
 
 
 if __name__ == "__main__":
-    # plotFields()
     animate_patch_time_series_gnn()
