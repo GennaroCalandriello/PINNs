@@ -24,12 +24,16 @@ def animate_patch_time_series_gnn(
 
     sigma_x = xynorm.std[0].item()
     rad_scaled = radius / sigma_x
-    edge_dim = data.edge_attr.shape[1]
     in_ch = data.x.size(-1)
     edge_dim = data.edge_attr.size(-1)
-    out_ch = data.y.size(-1) if hasattr(data, "y") else 3
+    out_ch = data.y.size(-1)
 
-    model = GraphAutoEncoder(in_ch=in_ch, edge_dim=edge_dim, out_ch=out_ch).to(device)
+    model = GraphAutoEncoder(
+        in_ch=in_ch,
+        edge_dim=edge_dim,
+        out_ch=out_ch,
+        clusters_per_level=CLUSTERS_PER_LEVEL,
+    ).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     # --- Normalize data ---
