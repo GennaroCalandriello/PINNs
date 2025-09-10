@@ -38,7 +38,7 @@ NUM_ENCODER_BLOCKS = 3  # pooling depth; 3 => ~1/8 nodes if ratio=0.5 each
 POOL_RATIO = 0.6  # keep top 50% nodes at each stage
 DROP = 0.1
 LR = 2e-3
-EPOCHS = 500
+EPOCHS = 2000
 BATCH_SIZE_NODES = 6000  # NeighborLoader target nodes per batch
 NEIGHBORS = [20, 15, 10]  # fanouts per hop
 GRAD_CLIP = 1.0
@@ -48,13 +48,15 @@ SCHEDULER_STEP = 200  # epochs per step of lr scheduler
 SELF_LOOP = False
 LEAKY = 0.2  # for LeakyReLU in attention
 ATTENTION_CHANNELS = 64  # attention channels in EdgeNodeAttentionPooling
-POOL_TYPE = "edge_node"  # 'topk', 'diffpool', 'edge_node'
+POOL_TYPE = (
+    "edge_node"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
+)
 CLUSTERS_PER_LEVEL = [100, 50, 25]  # for 'diffpool' and 'edge_node' only
 
 
 def build_sparse_adj(edge_index, num_nodes):
     row, col = edge_index
-    return SparseTensor(row=row, col=col, sparse_size=(num_nodes, num_nodes))
+    return SparseTensor(row=row, col=col, sparse_sizes=(num_nodes, num_nodes))
 
 
 def sparse_diff_pool(x, edge_index, S):
@@ -254,7 +256,7 @@ class EdgeGNNLayer(MessagePassing):
 
     def message(self, x_i, x_j, edge_attr):
         # x_i: dst features, x_j: src features
-        edge_attr = x_i.new_zeros((x_j.size(0), 0)) if edge_attr is None else edge_attr
+        edge_attr = x_i.new_zeros((x_i.size(0), 0)) if edge_attr is None else edge_attr
         m_in = torch.cat([x_i, x_j, edge_attr], dim=-1)
 
         return self.mlp_msg(m_in)
@@ -375,7 +377,7 @@ class GraphAutoEncoder(nn.Module):
         x = F.gelu(self.latent_up(x))
 
         # ====== Decoder ======
-        for dec, sate in zip(reversed(self.decoder), reversed(states)):
+        for dec, state in zip(reversed(self.decoder), reversed(states)):
             if state["type"] == "topk":
                 perm, N_prev = state["perm"], state["N_prev"]
                 edge_index_prev, edge_attr_prev = (
@@ -432,7 +434,7 @@ def train(model, loader, epochs=EPOCHS, lr=LR, use_amp=USE_AMP, grad_clip=GRAD_C
         model = torch.compile(model)
 
     model.train()
-
+    loss_list = []
     for ep in range(1, epochs + 1):
         tot = 0.0
         cnt = 0
@@ -454,8 +456,10 @@ def train(model, loader, epochs=EPOCHS, lr=LR, use_amp=USE_AMP, grad_clip=GRAD_C
             tot += loss.item()
             cnt += 1
         print(f"Epoch {ep:03d} | loss {tot/max(1,cnt):.6f}")
+        if ep % 5 == 0:
+            loss_list.append(tot / max(1, cnt))
 
-    return model
+    return model, loss_list
 
 
 def main():
@@ -472,8 +476,9 @@ def main():
         clusters_per_level=CLUSTERS_PER_LEVEL,
     )
     loader = GraphLoader(data)
-    trained_model = train(model, loader)
+    trained_model, loss_fn = train(model, loader)
     torch.save(trained_model.state_dict(), "model/gnn_ae.pth")
+    np.savetxt("model/loss_gnn_ae.npy", np.array(loss_fn))
     print("Model saved to model/gnn_ae.pth")
 
 

@@ -32,7 +32,8 @@ latent_dim = 10
 epochs = 3000
 scheduler_step = 500
 assign_dim = 5  # num_clusters for DiffPool
-path_data = "patches/patch_max_uniformCyl.pkl"  # Update with actual path
+# path_data = "patches/patch_max_uniformCyl.pkl"  # Update with actual path
+path_data = "patches/experiments.pkl"
 # path_data = "patches/patch_5k_uniform.pkl"
 radius = 3000
 
@@ -86,6 +87,7 @@ class GaussianNormalizer:
 def dataNormalizer(results):
 
     t0, centers, U, neighbours, edge_index = results[0]
+    print(centers)
     print(f"Data shape: {U.shape}")
     xynorm = GaussianNormalizer(centers)
     uvnorm = GaussianNormalizer(U)
@@ -96,7 +98,7 @@ def dataNormalizer(results):
     return t0, centers, U, neighbours, edge_index, xynorm, uvnorm
 
 
-def geometryObject(xy, center, radius):
+def geometryObjectcyl(xy, center, radius):
     """Create a geometric object (circle) for the given parameters."""
     cx, cy = center
     dist = torch.sqrt((xy[:, 0] - cx) ** 2 + (xy[:, 1] - cy) ** 2)
@@ -105,7 +107,20 @@ def geometryObject(xy, center, radius):
     return dist_norm.unsqueeze(1), circle.unsqueeze(1)
 
 
-def createGraphData():
+def geometryObject(xy, center, width, height):
+    """Rectangle: returns (normalized distance, inside_mask).
+    dist_norm = max( dx/(w/2), dy/(h/2) )."""
+    cx, cy = center
+    dx = (xy[:, 0] - cx).abs()
+    dy = (xy[:, 1] - cy).abs()
+    half_w = width * 0.5
+    half_h = height * 0.5
+    inside = (dx <= half_w) & (dy <= half_h)
+    dist_norm = torch.maximum(dx / (half_w + 1e-12), dy / (half_h + 1e-12))
+    return dist_norm.unsqueeze(1), inside.unsqueeze(1)
+
+
+def createGraphDataCyl():
     """Create a PyTorch Geometric Data object from the normalized data."""
     results, idx_cells = dataLoader(path_data)
     t0, centers, U, neighbours, edge_index, xynorm, uvnorm = dataNormalizer(results)
@@ -149,6 +164,84 @@ def createGraphData():
     edge_attr = torch.cat([relative_positions, distances], dim=1)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+
+
+# ...existing code...
+def createGraphData():
+    """Create a PyTorch Geometric Data object from the normalized data."""
+    results, idx_cells = dataLoader(path_data)
+
+    t0, centers, U, neighbours, edge_index, xynorm, uvnorm = dataNormalizer(results)
+
+    U_norm = uvnorm.encode(
+        torch.tensor(U, dtype=torch.float32, device=uvnorm.mean.device)
+    )
+    centers_norm = xynorm.encode(
+        torch.tensor(centers, dtype=torch.float32, device=xynorm.mean.device)
+    )
+
+    centers_norm = torch.as_tensor(centers_norm, dtype=torch.float32, device=device)
+    U_norm = torch.as_tensor(U_norm, dtype=torch.float32, device=device)
+
+    sigma_x = xynorm.std[0].item()
+    sigma_y = xynorm.std[1].item()
+    print(f"Sigma X: {sigma_x}, Sigma Y: {sigma_y}")
+
+    # --- Define physical rectangle parameters ---
+    cx_phys, cy_phys = 1050, 100  # <-- set your physical center here
+    rect_width_phys = 100  # full width in physical units
+    rect_height_phys = 200  # full height in physical units
+
+    # --- Convert to normalized space ---
+    center_norm = torch.tensor(
+        [
+            (cx_phys - xynorm.mean[0].item()) / (xynorm.std[0].item()),
+            (cy_phys - xynorm.mean[1].item()) / (xynorm.std[1].item()),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    rect_width_norm = rect_width_phys / sigma_x  # full width normalized
+    rect_height_norm = rect_height_phys / sigma_y  # full height normalized
+
+    print(f"Rectangle center (norm): {center_norm.tolist()}")
+    print(
+        f"Rectangle size (norm W x H): {rect_width_norm:.3f} x {rect_height_norm:.3f}"
+    )
+
+    # Rectangle features
+    rect_dist_norm, rect_mask = geometryObject(
+        centers_norm,
+        (center_norm[0].item(), center_norm[1].item()),
+        rect_width_norm,
+        rect_height_norm,
+    )
+    feature_list = [centers_norm, U_norm]
+    feature_list.append(rect_dist_norm)  # continuous distance-like feature
+    feature_list.append(rect_mask)  # binary inside flag
+
+    x = torch.cat(feature_list, dim=1)
+    y = U_norm
+
+    edge_src, edge_dst = [], []
+    for i, nbs in enumerate(neighbours):
+        for j in nbs:
+            edge_src.append(i)
+            edge_dst.append(j)
+
+    edge_src = torch.tensor(edge_src, dtype=torch.long, device=device)
+    edge_dst = torch.tensor(edge_dst, dtype=torch.long, device=device)
+    edge_index = torch.stack([edge_src, edge_dst], dim=0)
+
+    relative_positions = centers_norm[edge_dst] - centers_norm[edge_src]
+    distances = torch.norm(relative_positions, dim=1, keepdim=True)
+    edge_attr = torch.cat([relative_positions, distances], dim=1)
+
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+
+
+# ...existing code...
 
 
 class GNNAutoencoder(nn.Module):

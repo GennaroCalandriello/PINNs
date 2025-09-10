@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 # from ns_GNN_KF import *
 # from ns_gnn_diffpool import *
 # from correct import *
-from correct import *
+# from correct import *
+from EdgeNodeAttentionDiffPool import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -74,7 +75,10 @@ def animate_patch_time_series_gnn(
         U = torch.tensor(U, dtype=torch.float32, device=device)
         centers_norm = xynorm.encode(centers)
         U_norm = uvnorm.encode(U)
-        dist_norm, circle = geometryObject(centers_norm, (0, 0), rad_scaled)
+        # dist_norm, circle = geometryObject(centers_norm, (0, 0), rad_scaled)
+        dist_norm, circle = geometryObject(
+            centers_norm, (-0.4911, -1.2672), 0.120, 0.555
+        )
         x = torch.cat([centers_norm, U_norm, dist_norm, circle], dim=1)
         y = U_norm
         # Edges
@@ -115,16 +119,16 @@ def animate_patch_time_series_gnn(
     ax.set_ylabel("y")
     title = ax.set_title("t = 0.00")
     ax.axis("equal")
-    circle = Circle(
-        (cx, cy),
-        r_cyl_dec,
-        color="k",
-        fill=False,
-        linewidth=0.0,
-        linestyle="",
-        zorder=10,
-    )
-    ax.add_patch(circle)
+    # circle = Circle(
+    #     (cx, cy),
+    #     r_cyl_dec,
+    #     color="k",
+    #     fill=False,
+    #     linewidth=0.0,
+    #     linestyle="",
+    #     zorder=10,
+    # )
+    # ax.add_patch(circle)
 
     def update(frame):
         for c in ax.collections:
@@ -134,7 +138,7 @@ def animate_patch_time_series_gnn(
         )
         t_now = results[frame][0]
         title.set_text(f"t = {t_now:.3f}")
-        ax.add_patch(circle)
+        # ax.add_patch(circle)
         return []
 
     ani = FuncAnimation(

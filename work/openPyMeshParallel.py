@@ -7,6 +7,10 @@ import concurrent.futures
 
 patch_size = 40000
 path_pkl = f"patch_{patch_size//1000}k_uniform.pkl"
+path_time = "experiments_"
+dataSamplerPath = "VTKs/VTK7/experiments_*"
+savingPath = "patches/experiments.pkl"
+# path_time = "cylinderFlux_"
 
 total_train_time = 400
 
@@ -16,7 +20,7 @@ def _read_snapshot(snap_dir, total_train_time=total_train_time):
     print(f"Multiprocessing: Reading snapshot from {vtu_path}")
     if not os.path.exists(vtu_path):
         return None
-    t_str = os.path.basename(snap_dir).replace("cylinderFlux_", "")
+    t_str = os.path.basename(snap_dir).replace(path_time, "")
     try:
         t = float(t_str)
     except ValueError:
@@ -25,14 +29,19 @@ def _read_snapshot(snap_dir, total_train_time=total_train_time):
         return None
     t = t / 1000
     mesh = pv.read(vtu_path)
-    cell_centers = mesh.cell_centers().points[:, :2]
-    U = mesh["U"][:, :2]
+    pts = mesh.cell_centers().points
+    cell_centers = pts[:, [0, 2]]  # (x, z)
+    # cell_centers = mesh.cell_centers().points[:, :2]
+    # print(cell_centers)
+    # U = mesh["U"][:, :2]
+    U = mesh["U"][:, [0, 2]]  # keep components matching x,z
+    # print(U)
     neighbors = [mesh.cell_neighbors(i) for i in range(mesh.n_cells)]
     return {"t": t, "cell_centers": cell_centers, "U": U, "neighbors": neighbors}
 
 
 class DataSamplerVTK:
-    def __init__(self, vtk_dir_pattern="VTK/cylinderFlux_*", n_workers=8):
+    def __init__(self, vtk_dir_pattern, n_workers=8):
         self.snap_dirs = sorted(
             glob.glob(vtk_dir_pattern), key=lambda s: float(s.split("_")[-1])
         )
@@ -265,18 +274,18 @@ def plot_patch_real_mesh(vtu_path, idx_cells):
 if __name__ == "__main__":
     import pickle
 
-    # path_pkl = "patch_max_uniform.pkl"  # file pickle con i dati della patch
+    # path_pkl = savingPath  # file pickle con i dati della patch
     # with open(path_pkl, "rb") as f:
     #     data = pickle.load(f)
 
     # results = data["results"]
     # idx_cells = data["idx_cells"]
-    # plot_patch_real_mesh("VTK4/cylinderFlux_1000/internal.vtu", idx_cells)
-    sampler = DataSamplerVTK("VTKS/VTK6/cylinderFlux_*")
+    # plot_patch_real_mesh(savingPath, idx_cells)
+    sampler = DataSamplerVTK(dataSamplerPath)
     results, idx_cells = sampler.sample_time_series_patch(
-        N=None, mode="uniform", save_path=f"patches/patch_max_uniformCyl.pkl"
+        N=None, mode="uniform", save_path=savingPath
     )
-    # # sampler.plot_patch(idx_cells, snapshot_idx=0)
+    # # # sampler.plot_patch(idx_cells, snapshot_idx=0)
     # sampler.plot_sampled_patch(
     #     idx_cells, snapshot_idx=0, plot_edges=True, show_indices=True
     # )
