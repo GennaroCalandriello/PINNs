@@ -5,14 +5,14 @@ import os
 import pickle
 import concurrent.futures
 
-patch_size = 40000
-path_pkl = f"patch_{patch_size//1000}k_uniform.pkl"
+# patch_size = 40000
+# path_pkl = f"patch_{patch_size//1000}k_uniform.pkl"
 path_time = "experiments_"
 dataSamplerPath = "VTKs/VTK7/experiments_*"
 savingPath = "patches/experiments.pkl"
 # path_time = "cylinderFlux_"
 
-total_train_time = 400
+total_train_time = 1000
 
 
 def _read_snapshot(snap_dir, total_train_time=total_train_time):
@@ -41,7 +41,7 @@ def _read_snapshot(snap_dir, total_train_time=total_train_time):
 
 
 class DataSamplerVTK:
-    def __init__(self, vtk_dir_pattern, n_workers=8):
+    def __init__(self, vtk_dir_pattern, n_workers=10):
         self.snap_dirs = sorted(
             glob.glob(vtk_dir_pattern), key=lambda s: float(s.split("_")[-1])
         )
@@ -174,6 +174,7 @@ class DataSamplerVTK:
             cell_centers = d["cell_centers"][idx_cells]
             U = d["U"][idx_cells]
             t = d["t"]
+            print("times", t)
             neighbors_full = d["neighbors"]
             idx_map = {orig_idx: i for i, orig_idx in enumerate(idx_cells)}
             neighbors_batch = []

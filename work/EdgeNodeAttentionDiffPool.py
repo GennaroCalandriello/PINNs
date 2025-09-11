@@ -32,13 +32,13 @@ print(f"Using device: {device}")
 
 # ====== Hyperparameters (adjust to your GPU) ======
 HIDDEN = 64
-LATENT = 64
-EDGE_HIDDEN = 64
-NUM_ENCODER_BLOCKS = 3  # pooling depth; 3 => ~1/8 nodes if ratio=0.5 each
-POOL_RATIO = 0.6  # keep top 50% nodes at each stage
+LATENT = 30
+EDGE_HIDDEN = 30
+# NUM_ENCODER_BLOCKS = 4  # pooling depth; 3 => ~1/8 nodes if ratio=0.5 each
+POOL_RATIO = 0.5  # keep top % nodes at each stage
 DROP = 0.1
-LR = 2e-3
-EPOCHS = 2000
+LR = 1e-3
+EPOCHS = 800
 BATCH_SIZE_NODES = 6000  # NeighborLoader target nodes per batch
 NEIGHBORS = [20, 15, 10]  # fanouts per hop
 GRAD_CLIP = 1.0
@@ -46,12 +46,20 @@ USE_AMP = True  # mixed precision
 USE_COMPILE = False  # torch.compile for fused kernels
 SCHEDULER_STEP = 200  # epochs per step of lr scheduler
 SELF_LOOP = False
-LEAKY = 0.2  # for LeakyReLU in attention
-ATTENTION_CHANNELS = 64  # attention channels in EdgeNodeAttentionPooling
+LEAKY = 0.1  # for LeakyReLU in attention
+ATTENTION_CHANNELS = 60  # attention channels in EdgeNodeAttentionPooling
 POOL_TYPE = (
     "edge_node"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
 )
-CLUSTERS_PER_LEVEL = [100, 50, 25]  # for 'diffpool' and 'edge_node' only
+CLUSTERS_PER_LEVEL = [
+    10000,
+    5000,
+    2000,
+    1000,
+    500,
+    200,
+]  # for 'diffpool' and 'edge_node' only
+NUM_ENCODER_BLOCKS = len(CLUSTERS_PER_LEVEL)
 
 
 def build_sparse_adj(edge_index, num_nodes):
@@ -345,7 +353,7 @@ class GraphAutoEncoder(nn.Module):
         self.decoder = nn.ModuleList(
             [EdgeGNNLayer(hidden, hidden, edge_dim) for _ in range(depth)]
         )
-        self.head = nn.Linear(latent, out_ch)
+        self.head = nn.Linear(hidden, out_ch)
 
     def forward(self, data):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr

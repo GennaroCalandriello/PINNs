@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 # from ns_GNN_KF import *
 # from ns_gnn_diffpool import *
@@ -7,6 +8,8 @@ import matplotlib.pyplot as plt
 from EdgeNodeAttentionDiffPool import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+geometry = "rectangle"  # "circle" or "rectangle"
 
 
 def animate_patch_time_series_gnn(
@@ -48,7 +51,7 @@ def animate_patch_time_series_gnn(
     # Mask (fluid region)
     cx, cy = 10000, 10000
     r_cyl_dec = 3000
-    mask_fluid = ((xdec - cx) ** 2 + (ydec - cy) ** 2) >= r_cyl_dec**2
+    mask_fluid = ((xdec - cx) ** 2 + (ydec - cy) ** 2) >= 0
     xdec_fluid = xdec[mask_fluid]
     ydec_fluid = ydec[mask_fluid]
 
@@ -108,7 +111,6 @@ def animate_patch_time_series_gnn(
     vmin, vmax = mag_vals.min(), mag_vals.max()
 
     # --- Animation setup ---
-    import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 6))
     cntr = ax.tricontourf(
@@ -117,18 +119,41 @@ def animate_patch_time_series_gnn(
     cb = fig.colorbar(cntr, ax=ax, label="|u,v|")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
+    # ax.set_xlim(min(xdec), max(xdec))
+    # ax.set_ylim(min(ydec), max(ydec))
+    ax.set_xlim(0, 1200)
+    ax.set_ylim(0, 3000)
     title = ax.set_title("t = 0.00")
     ax.axis("equal")
-    # circle = Circle(
-    #     (cx, cy),
-    #     r_cyl_dec,
-    #     color="k",
-    #     fill=False,
-    #     linewidth=0.0,
-    #     linestyle="",
-    #     zorder=10,
-    # )
-    # ax.add_patch(circle)
+    if geometry == "circle":
+        circle = Circle(
+            (cx, cy),
+            r_cyl_dec,
+            color="k",
+            fill=False,
+            linewidth=0.0,
+            linestyle="",
+            zorder=10,
+        )
+        # ax.add_patch(circle)
+    elif geometry == "rectangle":
+        rect_x = 1000  # x-coordinate of the lower left corner
+        rect_y = min(ydec)  # y-coordinate of the lower left corner
+        rect_width = 100  # width of the rectangle
+        rect_height = 200  # height of the rectangle
+
+        rectangle = Rectangle(
+            (rect_x, rect_y),
+            rect_width,
+            rect_height,
+            color="k",  # black border
+            fill=False,  # not filled
+            linewidth=0,  # border thickness
+            linestyle="",  # dashed border
+            zorder=10,  # draw above the circle if both are present
+        )
+
+        ax.add_patch(rectangle)
 
     def update(frame):
         for c in ax.collections:
@@ -138,7 +163,9 @@ def animate_patch_time_series_gnn(
         )
         t_now = results[frame][0]
         title.set_text(f"t = {t_now:.3f}")
+
         # ax.add_patch(circle)
+        ax.add_patch(rectangle)
         return []
 
     ani = FuncAnimation(
