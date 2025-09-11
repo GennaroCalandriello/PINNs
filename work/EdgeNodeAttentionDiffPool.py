@@ -31,33 +31,32 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ====== Hyperparameters (adjust to your GPU) ======
-HIDDEN = 64
-LATENT = 30
-EDGE_HIDDEN = 30
+HIDDEN = 150
+LATENT = 70
+EDGE_HIDDEN = 48
 # NUM_ENCODER_BLOCKS = 4  # pooling depth; 3 => ~1/8 nodes if ratio=0.5 each
 POOL_RATIO = 0.5  # keep top % nodes at each stage
 DROP = 0.1
 LR = 1e-3
-EPOCHS = 800
-BATCH_SIZE_NODES = 6000  # NeighborLoader target nodes per batch
-NEIGHBORS = [20, 15, 10]  # fanouts per hop
+EPOCHS = 200
+BATCH_SIZE_NODES = 4096  # NeighborLoader target nodes per batch
+NEIGHBORS = [50, 40, 30]  # fanouts per hop
 GRAD_CLIP = 1.0
 USE_AMP = True  # mixed precision
 USE_COMPILE = False  # torch.compile for fused kernels
 SCHEDULER_STEP = 200  # epochs per step of lr scheduler
-SELF_LOOP = False
+SELF_LOOP = True
 LEAKY = 0.1  # for LeakyReLU in attention
-ATTENTION_CHANNELS = 60  # attention channels in EdgeNodeAttentionPooling
+ATTENTION_CHANNELS = 96  # attention channels in EdgeNodeAttentionPooling
 POOL_TYPE = (
     "edge_node"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
 )
 CLUSTERS_PER_LEVEL = [
-    10000,
+    12000,
+    8000,
     5000,
+    3000,
     2000,
-    1000,
-    500,
-    200,
 ]  # for 'diffpool' and 'edge_node' only
 NUM_ENCODER_BLOCKS = len(CLUSTERS_PER_LEVEL)
 
@@ -145,7 +144,12 @@ class EdgeNodePoolBlock(nn.Module):
         super().__init__()
         self.gnn = EdgeGNNLayer(ch, ch, edge_dim)
         self.assign = nn.Sequential(
-            nn.Linear(ch, ch), nn.GELU(), nn.Linear(ch, num_clusters)
+            nn.Linear(ch, ch),
+            nn.LayerNorm(ch),
+            nn.GELU(),
+            nn.Linear(ch, ch),
+            nn.LayerNorm(ch),
+            nn.GELU(),
         )
         self.pool = EdgeNodeAttentionPooling(in_ch=ch, att_ch=max(32, ch // 2))
 
@@ -221,12 +225,16 @@ class EdgeGNNLayer(MessagePassing):
         super().__init__(aggr=aggr, node_dim=0)
         self.mlp_msg = nn.Sequential(
             nn.Linear(2 * in_ch + edge_dim, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, out_ch),
         )
         self.mlp_upd = nn.Sequential(
             nn.Linear(in_ch + out_ch, hidden),
+            nn.LayerNorm(hidden),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, out_ch),
         )
         # self.bn = nn.BatchNorm1d(out_ch)
@@ -270,37 +278,6 @@ class EdgeGNNLayer(MessagePassing):
         return self.mlp_msg(m_in)
 
     # ====== Encoder using TopK pooling ======
-
-
-# class Encoder(nn.Module):
-
-#     def __init__(self, in_ch, out_ch, edge_dim, ratio=POOL_RATIO):
-#         super().__init__()
-#         self.gnn = EdgeGNNLayer(in_ch, out_ch, edge_dim)
-#         self.score = nn.Linear(out_ch, 1)
-#         self.pool = TopKPooling(out_ch, ratio=ratio)
-
-#     def forward(self, x, edge_index, edge_attr, batch):
-#         x = self.gnn(x, edge_index, edge_attr)
-#         s = self.score(x).squeeze(-1)
-#         x, edge_index, edge_attr, batch, perm, _ = self.pool(
-#             x, edge_index, batch=batch, attn=s, edge_attr=edge_attr
-#         )
-#         return (x, edge_index, edge_attr, batch), perm
-
-
-# # ====== Decoder using unpooling ======
-# class Decoder(nn.Module):
-#     def __init__(self, in_ch, out_ch, edge_dim):
-#         super().__init__()
-#         self.gnn = EdgeGNNLayer(in_ch, out_ch, edge_dim)
-
-#     def forward(self, x_coarse, perm, N_prev, edge_index_prev, edge_attr_prev):
-#         # unpool by scattering back to previous nodes
-#         x_full = x_coarse.new_zeros((N_prev, x_coarse.size(-1)))
-#         x_full[perm] = x_coarse
-#         x_full = self.gnn(x_full, edge_index_prev, edge_attr_prev)
-#         return x_full
 
 
 class GraphAutoEncoder(nn.Module):
@@ -427,45 +404,122 @@ def GraphLoader(graph_data, batch_size_nodes=BATCH_SIZE_NODES, neighbors=NEIGHBO
     return loader
 
 
-def train(model, loader, epochs=EPOCHS, lr=LR, use_amp=USE_AMP, grad_clip=GRAD_CLIP):
+def train(
+    model,
+    loader,
+    epochs=EPOCHS,
+    lr=LR,
+    use_amp=USE_AMP,
+    grad_clip=GRAD_CLIP,
+    scheduler_step=SCHEDULER_STEP,
+    # ---- boundary weighting (attivo) ----
+    use_boundary_weights=True,
+    gamma=4.0,  # rinforzo sui nodi vicino al muro
+    delta=0.03,  # spessore fascia (in coordinate normalizzate)
+    # ---- boundary condition losses (opzionale) ----
+    use_bc_losses=True,
+    lambda_np=1.0,  # peso no-penetration
+    lambda_ns=0.2,  # peso no-slip
+    # ---- dove leggere sdf/n_hat se non sono in batch.sdf / batch.n_hat ----
+    sdf_col=4,  # indice colonna sdf in batch.x (se non esiste batch.sdf)
+    nx_col=6,
+    ny_col=7,  # indici colonne n_hat in batch.x (se non esiste batch.n_hat)
+):
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(
-        opt, step_size=SCHEDULER_STEP, gamma=0.9
+        opt, step_size=scheduler_step, gamma=0.9
     )
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    scaler = torch.amp.GradScaler(enabled=USE_AMP)
-
-    # optional compiler
-    if USE_COMPILE and hasattr(torch, "compile"):
-        print("Using torch.compile for optimized training")
-        model = torch.compile(model)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and (device.type == "cuda"))
 
     model.train()
     loss_list = []
+
     for ep in range(1, epochs + 1):
         tot = 0.0
         cnt = 0
+
         for batch in loader:
             batch = batch.to(device)
             opt.zero_grad(set_to_none=True)
-            ctx = torch.cuda.amp.autocast(enabled=use_amp and (device == "cuda"))
+
+            # center nodes: se NeighborLoader, altrimenti prendi tutti
+            center = getattr(batch, "batch_size", batch.x.size(0))
+
+            # target dimension (es. u,v o u,v,p)
+            target_dim = batch.y.size(1)
+
+            # --- autocast solo su CUDA ---
+            ctx = torch.cuda.amp.autocast(enabled=use_amp and (device.type == "cuda"))
             with ctx:
-                out = model(batch)
-                # center-node loss
-                center = batch.batch_size
-                loss = F.mse_loss(out[:center], batch.y[:center])
+                out = model(batch)  # [N, out_ch]
+                pred = out[:center, :target_dim]
+                tgt = batch.y[:center, :target_dim]
+
+                # ---- boundary weights (da sdf) ----
+                if use_boundary_weights:
+                    if hasattr(batch, "sdf"):
+                        sdf_c = batch.sdf[:center]  # [center,1]
+                    else:
+                        sdf_c = batch.x[:center, sdf_col : sdf_col + 1]
+                    # peso più alto vicino al muro (sdf≈0+)
+                    w_boundary = 1.0 + (gamma - 1.0) * torch.exp(
+                        -(sdf_c.clamp_min(0.0) / delta)
+                    )
+                else:
+                    w_boundary = 1.0
+
+                # ---- data loss pesata (MSE) ----
+                err = (pred - tgt) ** 2
+                loss_data = (w_boundary * err).mean()
+
+                # ---- BC losses (opzionali, solo su u,v) ----
+                loss_bc = pred.new_zeros(())
+                if use_bc_losses and target_dim >= 2:
+                    # normali
+                    if hasattr(batch, "n_hat"):
+                        n_hat_c = batch.n_hat[:center, :2]  # [center,2]
+                    else:
+                        n_hat_c = batch.x[
+                            :center, nx_col : ny_col + 1
+                        ]  # [center,2] nx,ny
+                    # tangente 2D
+                    t_hat_c = torch.stack([-n_hat_c[:, 1], n_hat_c[:, 0]], dim=1)
+
+                    u_pred = pred[:, :2]  # [center,2]
+                    u_n = (u_pred * n_hat_c).sum(dim=1, keepdim=True)
+                    u_t = (u_pred * t_hat_c).sum(dim=1, keepdim=True)
+
+                    # fascia vicino al muro
+                    if not use_boundary_weights:
+                        # se non abbiamo calcolato sdf_c sopra
+                        if hasattr(batch, "sdf"):
+                            sdf_c = batch.sdf[:center]
+                        else:
+                            sdf_c = batch.x[:center, sdf_col : sdf_col + 1]
+                    mask_bc = (sdf_c < delta).float()
+
+                    loss_np = (mask_bc * (u_n**2)).mean()  # no-penetration
+                    loss_ns = (mask_bc * (u_t**2)).mean()  # no-slip (soft)
+                    loss_bc = lambda_np * loss_np + lambda_ns * loss_ns
+
+                loss = loss_data + loss_bc
+
+            # ---- backward/step ----
             scaler.scale(loss).backward()
             if grad_clip is not None:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(opt)
             scaler.update()
+
             tot += loss.item()
             cnt += 1
-        print(f"Epoch {ep:03d} | loss {tot/max(1,cnt):.6f}")
-        if ep % 5 == 0:
-            loss_list.append(tot / max(1, cnt))
+
+        scheduler.step()
+        avg = tot / max(1, cnt)
+        print(f"Epoch {ep:03d} | loss {avg:.6f}")
+        loss_list.append(avg)
 
     return model, loss_list
 

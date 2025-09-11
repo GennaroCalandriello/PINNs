@@ -1,276 +1,130 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
-from ns_GNN_KF import GaussianNormalizer, createGraphData, dataLoader, dataNormalizer
-import numpy as np
-from torch_geometric.data import Data
-from torch_geometric.nn import DenseSAGEConv, dense_diff_pool
-from torch_geometric.utils import to_dense_batch, to_dense_adj
-from aggr import LSTMAggregatorTorch
+from torch_scatter import scatter_add
 
-# ==== Hyperparameters ====
-num_layers = 2
-hidden_dim = 70
-latent_dim = 20
-epochs = 3000
-scheduler_step = 500
-assign_dim = 10  # num_clusters for DiffPool
-radius = 3000
+# Patch-1 (DATA): aggiunge SDF (distanza firmata dal bordo), indicatore (inside), normale
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+#  alle feature dei nodi; opzionale cp (edge feature orientata per la swirl).
+
+# Patch-2 (POOL): rende il pooling boundary-aware (non butta i nodi vicini al muro) per TopK e ENAD.
 
 
-# ==== GNOLayer (PyG-style, pure PyTorch, with aggregators) ====
-class GNOLayer(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        edge_dim,
-        hidden_dim,
-        aggregator_type="mean",
-        activation=F.relu,
-        dropout=0.0,
-        bn=False,
-        bias=True,
-    ):
-        super(GNOLayer, self).__init__()
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * in_features + edge_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, out_features),
-        )
-        self.node_mlp = nn.Sequential(
-            nn.Linear(in_features + out_features, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, out_features),
-        )
-        self.dropout = nn.Dropout(p=dropout)
-        self.activation = activation
-        self.use_bn = bn
-        if self.use_bn:
-            self.bn = nn.BatchNorm1d(out_features)
-        self.aggregator_type = aggregator_type
-        if aggregator_type == "lstm":
-            self.aggregator = LSTMAggregatorTorch(out_features, hidden_dim)
+# Patch-3 (LOSS): aggiunge pesi sulla loss vicino al muro + termini di BC (no-penetration/no-slip) in training.
+# ---- SDF & indicator in spazio normalizzato ----
+def sdf_features_normalized(centers_norm, obstacles_norm):
+    x = centers_norm[:, 0]
+    y = centers_norm[:, 1]
+    N = centers_norm.size(0)
+    sdf = torch.full((N,), 1e6, device=centers_norm.device)
+    inside_any = torch.zeros((N,), dtype=torch.bool, device=centers_norm.device)
 
-    def forward(self, x, edge_index, edge_attr):
-        """Dimensioni:
-        x: [num_nodes, in_features]
-        edge_index: [2, num_edges]
-        edge_attr: [num_edges, edge_dim]
-        """
-        x = self.dropout(x)
-        src, dst = edge_index
-        x_src = x[
-            src
-        ]  # [num_edges, in_features] src = source nodes, dst = destination nodes
-        x_dst = x[dst]  # [num_edges, in_features]
-        m_input = torch.cat([x_src, x_dst, edge_attr], dim=1)
-        # m is the message tensor
-        m = self.edge_mlp(m_input)  # [num_edges, out_features]
+    for o in obstacles_norm:
+        if o["type"] == "circle":
+            dx = x - o["cx"]
+            dy = y - o["cy"]
+            d = torch.sqrt(dx * dx + dy * dy) - o["r"]
+            sdf = torch.minimum(sdf, d)
+            inside_any |= d <= 0
+        else:
+            px = x
+            py = y
+            x0, y0, w, h = o["x0"], o["y0"], o["w"], o["h"]
+            dx0 = torch.maximum(x0 - px, torch.zeros_like(px))
+            dx1 = torch.maximum(px - (x0 + w), torch.zeros_like(px))
+            dy0 = torch.maximum(y0 - py, torch.zeros_like(py))
+            dy1 = torch.maximum(py - (y0 + h), torch.zeros_like(py))
+            outside = torch.sqrt((dx0 + dx1) ** 2 + (dy0 + dy1) ** 2)
+            inside = (px >= x0) & (px <= x0 + w) & (py >= y0) & (py <= y0 + h)
+            d = torch.where(
+                inside,
+                -torch.minimum(
+                    torch.minimum(px - x0, (x0 + w) - px),
+                    torch.minimum(py - y0, (y0 + h) - py),
+                ),
+                outside,
+            )
+            sdf = torch.minimum(sdf, d)
+            inside_any |= inside
 
-        # === Aggregation ===
-        if (
-            self.aggregator_type == "maxpool"
-        ):  # better for detecting "extreme" behaviors, but can be noisy. It captures strong local effects
-            agg = torch_scatter.scatter_max(m, dst, dim=0, dim_size=x.shape[0])[0]
-        elif self.aggregator_type == "mean":
-            agg = torch_scatter.scatter_mean(m, dst, dim=0, dim_size=x.shape[0])
-        elif self.aggregator_type == "lstm":
-            agg = self.aggregator(m, dst, x.shape[0])
-
-        node_input = torch.cat([x, agg], dim=1)
-
-        """ h_new applies a multi-layer perceptron to transform the concatenated
-        features into the new node representation. This MLP learns how to effectively
-        combine the node's original features with the aggregated neighborhood information,
-        essentially determining what aspects of both sources are most important for the final representation."""
-
-        h_new = self.node_mlp(node_input)
-        if self.use_bn:
-            h_new = self.bn(h_new)
-        if self.activation:
-            h_new = self.activation(h_new)
-        return h_new
-        # Output: [num_nodes, out_features]
+    return sdf.unsqueeze(1), inside_any.float().unsqueeze(1)  # [N,1],[N,1]
 
 
-class GNNEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim, edge_dim, num_layers):
-        super().__init__()
-        self.embedding = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        self.layers = nn.ModuleList(
-            [
-                GNOLayer(hidden_dim, hidden_dim, hidden_dim, edge_dim)
-                for _ in range(num_layers)
-            ]
-        )
-        self.to_latent = nn.Linear(hidden_dim, latent_dim)
-
-    def forward(self, data):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        x = self.embedding(x)
-        for layer in self.layers:
-            x = layer(x, edge_index, edge_attr)
-        return self.to_latent(x)
+# ---- gradiente SDF → normale stimata ----
+def estimate_normals_from_sdf(pos, edge_index, sdf):
+    src, dst = edge_index
+    rij = pos[dst] - pos[src]  # [E,2]
+    lij2 = (rij**2).sum(dim=1, keepdim=True).clamp_min(1e-12)  # [E,1]
+    dphi = sdf[dst] - sdf[src]  # [E,1]
+    gij = (dphi / lij2) * rij  # [E,2]
+    g = scatter_add(gij, dst, dim=0, dim_size=pos.size(0))  # [N,2]
+    n = g / (g.norm(dim=1, keepdim=True).clamp_min(1e-9))
+    n[n != n] = 0.0
+    return n  # [N,2]
 
 
-class DiffPoolEncoder(nn.Module):
-    def __init__(
-        self, input_dim, hidden_dim, latent_dim, edge_dim, num_layers, num_clusters
-    ):
-        super().__init__()
-        self.embedding = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
-        self.gno_layers = nn.ModuleList(
-            [
-                GNOLayer(hidden_dim, hidden_dim, edge_dim, hidden_dim)
-                for _ in range(num_layers)
-            ]
-        )
-
-        # use dense GNN on dense batches
-        self.gnn_embed = DenseSAGEConv(hidden_dim, hidden_dim)
-        self.gnn_assign = DenseSAGEConv(hidden_dim, num_clusters)
-        self.num_clusters = num_clusters
-        self.to_latent = nn.Linear(hidden_dim, latent_dim)
-
-    def forward(self, data):
-        """
-        data: PyG Data object with fields:
-            - x: node features [num_nodes, input_dim]
-            - edge_index: edge indices [2, num_edges] matrice di adiacenza
-            - edge_attr: edge features [num_edges, edge_dim] edge features
-        """
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        x = self.embedding(x)
-        for layer in self.gno_layers:
-            x = layer(x, edge_index, edge_attr)
-        batch = getattr(data, "batch", None)
-        x_dense, mask = to_dense_batch(x, batch)
-        adj_dense = to_dense_adj(edge_index, batch=batch)
-        Z = self.gnn_embed(x_dense, adj_dense)
-        S = F.softmax(self.gnn_assign(x_dense, adj_dense), dim=-1)
-        x_pooled, adj_pooled, _, _ = dense_diff_pool(
-            Z, adj_dense, S, mask
-        )  # output: [batch, num_clusters, hidden_dim], for single graph, batch=1, so squeeze
-        x_pooled = x_pooled.squeeze(0)
-        z_latent = self.to_latent(x_pooled)
-
-        return adj_pooled, z_latent, S.squeeze(0)
+# ---- edge features: rel, dist, (opzionale) cp orientato per vortici ----
+def build_edge_attr(centers_norm, U_norm, edge_index, use_cp=False):
+    src, dst = edge_index
+    rel = centers_norm[dst] - centers_norm[src]  # [E,2]
+    dist = torch.norm(rel, dim=1, keepdim=True)  # [E,1]
+    if not use_cp:
+        return torch.cat([rel, dist], dim=1)  # edge_dim = 3
+    dvel = U_norm[dst] - U_norm[src]  # [E,2]
+    cp = rel[:, 0:1] * dvel[:, 1:2] - rel[:, 1:2] * dvel[:, 0:1]  # [E,1]
+    return torch.cat([rel, dist, cp], dim=1)  # edge_dim = 4
 
 
-# ==== Decoder ====
-class GNNDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dim, output_dim):
-        super().__init__()
-        self.layer1 = nn.Linear(latent_dim, hidden_dim)
-        self.layer2 = nn.Linear(hidden_dim, output_dim)
+# x = [centers_norm(2), U_norm(2), sdf(1), indicator(1), n_hat(2), u_n(1), u_t(1)]  => in_ch = 9
+sdf, indicator = sdf_features_normalized(centers_norm, obstacles_norm)  # [N,1],[N,1]
+n_hat = estimate_normals_from_sdf(centers_norm, edge_index, sdf)  # [N,2]
+u_n = (U_norm * n_hat).sum(dim=1, keepdim=True)  # [N,1]
+t_hat = torch.stack([-n_hat[:, 1], n_hat[:, 0]], dim=1)  # [N,2]
+u_t = (U_norm * t_hat).sum(dim=1, keepdim=True)  # [N,1]
+x = torch.cat([centers_norm, U_norm, sdf, indicator, n_hat, u_n, u_t], dim=1)
 
-    def forward(self, z):
-        h = F.gelu(self.layer1(z))
-        return self.layer2(h)
-
-
-class GNNAutoencoder(nn.Module):
-    def __init__(
-        self,
-        input_dim,
-        hidden_dim,
-        latent_dim,
-        output_dim,
-        edge_dim,
-        num_layers,
-        num_clusters,
-    ):
-        super().__init__()
-        # self.encoder = DiffPoolEncoder(
-        #     input_dim, hidden_dim, latent_dim, edge_dim, num_layers, num_clusters
-        # )
-        self.encoder = GNNEncoder(
-            input_dim, hidden_dim, latent_dim, edge_dim, num_layers
-        )
-        self.decoder = GNNDecoder(latent_dim, hidden_dim, output_dim)
-
-    def forward(self, data):
-        adj_pooled, z_latent, S = self.encoder(data)
-        reconstructed = self.decoder(z_latent)  # [num_clusters, output_dim]
-        return reconstructed
-
-    def reconstruct_full(self, data):
-        # Ricostruisce sullo spazio dei nodi originali
-        adj_pooled, z_latent, S = self.encoder(data)
-        reconstructed = self.decoder(z_latent)  # [num_clusters, output_dim]
-        # Proietta i risultati di cluster --> nodi
-        reconstructed_full = S @ reconstructed  # [num_nodes, output_dim]
-        return reconstructed_full
+# edge_attr coerente con training:
+edge_attr = build_edge_attr(centers_norm, U_norm, edge_index, use_cp=False)
 
 
-# ==== Training Loop ====
-def train(data, latent_dim=latent_dim, epochs=epochs):
-    print("Starting training...")
-    input_dim = data.x.shape[1]
-    edge_dim = data.edge_attr.shape[1]
-    # output_dim = data.y.shape[1]
-    output_dim = 3  # Assuming u, v, p
-
-    model = GNNAutoencoder(
-        input_dim=input_dim,
-        hidden_dim=hidden_dim,
-        latent_dim=latent_dim,
-        output_dim=output_dim,
-        edge_dim=edge_dim,
-        num_layers=num_layers,
-        num_clusters=assign_dim,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=scheduler_step, gamma=0.9
-    )
-    data = data.to(device)
-    loss_history = []
-
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        pred = model(data)  # shape: [num_clusters, output_dim]
-        # You need to map data.y to clusters if you want strict nodewise loss,
-        # here just compare first k nodes for demonstration.
-        # (You probably want to aggregate or interpolate targets in practice.)
-        target = data.y[: pred.shape[0]]
-        # loss = F.mse_loss(pred, target)
-        loss = F.mse_loss(pred[:, :2], target)
-
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        if epoch % 1 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item()}")
-            loss_history.append(loss.item())
-    print(" ✅ Training complete.")
-
-    torch.save(model.state_dict(), "model/gnn_autoencoder.pth")
-    np.save("model/loss_history.npy", np.array(loss_history))
-    print(" ✅ Model and loss history saved.")
+logits = self.assign(x)  # [N,C]
+SDF_COL = 4
+dist_norm = x[:, SDF_COL : SDF_COL + 1]
+bd_mask = dist_norm.squeeze(1) < 0.03
+K = max(1, logits.size(1) // 8)  # ~12.5% cluster dedicati al boundary
+logits[bd_mask, :K] += 8.0
+S = F.softmax(logits, dim=-1)
 
 
-if __name__ == "__main__":
-    # Your createGraphData() must return a PyG Data object with .x, .edge_index, .edge_attr, .y
-    data = createGraphData()
-    train(data, latent_dim=latent_dim, epochs=epochs)
-    print("Training finished and model saved.")
+center = batch.batch_size  # center nodes (NeighborLoader)
+pred_u, pred_v = pred[:center, 0], pred[:center, 1]
+gt_u, gt_v = batch.y[:center, 0], batch.y[:center, 1]
+
+# estrai sdf e normale dal batch (adegua gli indici/nomi)
+SDF_COL = 4
+NORM_X_COL = 6
+NORM_Y_COL = 7
+sdf_c = batch.x[:center, SDF_COL : SDF_COL + 1]
+n_hat_c = batch.x[:center, NORM_X_COL : NORM_X_COL + 2]  # [center,2]
+t_hat_c = torch.stack([-n_hat_c[:, 1], n_hat_c[:, 0]], dim=1)  # [center,2]
+
+# pesi boundary (γ e δ da regolare)
+gamma, delta = 4.0, 0.03
+w_boundary = 1.0 + (gamma - 1.0) * torch.exp(-(sdf_c.clamp_min(0.0) / delta))
+
+# data loss (pesata sul boundary)
+err = torch.stack([(pred_u - gt_u) ** 2, (pred_v - gt_v) ** 2], dim=1)  # [center,2]
+loss_data = (w_boundary * err).mean()
+
+# BC fisiche (no-penetration / no-slip in fascia)
+u_pred = torch.stack([pred_u, pred_v], dim=1)
+u_n = (u_pred * n_hat_c).sum(dim=1, keepdim=True)  # componente normale predetta
+u_t = (u_pred * t_hat_c).sum(dim=1, keepdim=True)  # componente tangenziale predetta
+mask_bc = (sdf_c < 0.03).float()  # fascia vicino al muro
+
+lambda_np = 1.0  # no-penetration
+lambda_ns = 0.2  # no-slip (più morbido, se flusso laminare)
+loss_np = (mask_bc * (u_n**2)).mean()
+loss_ns = (mask_bc * (u_t**2)).mean()
+
+loss = loss_data + lambda_np * loss_np + lambda_ns * loss_ns
+loss.backward()

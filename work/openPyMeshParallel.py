@@ -149,7 +149,8 @@ class DataSamplerVTK:
         mode: "local", "uniform", "grid"
         """
         if save_path is not None and os.path.exists(save_path):
-            print(f"[DataSampler] Carico patch da '{save_path}'")
+            print(f"[DataSampler] Cancello '{save_path}'")
+            os.remove(save_path)
             with open(save_path, "rb") as f:
                 data = pickle.load(f)
             return data["results"], data["idx_cells"]
