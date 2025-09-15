@@ -1,0 +1,8 @@
+CompileFlags:
+  Add: [
+    "-nocudainc",
+    "-nocudalib"
+  ]
+
+Diagnostics:
+  Suppress: attributes_not_allowed
