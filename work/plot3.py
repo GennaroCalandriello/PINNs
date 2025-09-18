@@ -9,11 +9,12 @@ from matplotlib.animation import FuncAnimation
 from torch_scatter import scatter_add
 
 # ====== TUOI IMPORT ======
-from ns_GNN_KF import dataLoader, dataNormalizer, createGraphData
-from EdgeNodeAttentionDiffPool import (
-    GraphAutoEncoder,
-    CLUSTERS_PER_LEVEL,
-)  # usa la tua classe
+# from ns_GNN_KF import dataLoader, dataNormalizer, createGraphData
+# from EdgeNodeAttentionDiffPool import (
+#     GraphAutoEncoder,
+#     CLUSTERS_PER_LEVEL,
+# )  # usa la tua classe
+from ENAD import *
 
 # ====== CONFIG ======
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -250,7 +251,7 @@ def animate_patch_time_series_gnn(out_gif=OUT_GIF, model_path=MODEL_PATH):
             clusters_per_level=CLUSTERS_PER_LEVEL,
         ).to(device)
     except TypeError:
-        model = GraphAutoEncoder(in_ch=in_ch, edge_dim=edge_dim, out_ch=out_ch).to(
+        model = GraphAutoEncoder(in_ch=in_ch, edge_in_dim=edge_dim, out_ch=out_ch).to(
             device
         )
 

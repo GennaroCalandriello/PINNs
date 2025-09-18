@@ -8,11 +8,11 @@ import concurrent.futures
 # patch_size = 40000
 # path_pkl = f"patch_{patch_size//1000}k_uniform.pkl"
 path_time = "experiments_"
-dataSamplerPath = "VTKs/VTK7/experiments_*"
-savingPath = "patches/experiments.pkl"
+dataSamplerPath = "VTKs/VTK8/experiments_*"
+savingPath = "patches/experiments20k.pkl"
 # path_time = "cylinderFlux_"
 
-total_train_time = 1000
+total_train_time = 1600
 
 
 def _read_snapshot(snap_dir, total_train_time=total_train_time):
@@ -27,7 +27,7 @@ def _read_snapshot(snap_dir, total_train_time=total_train_time):
         return None
     if t is None or not (0 < t <= total_train_time):
         return None
-    t = t / 1000
+    t = t / 1600
     mesh = pv.read(vtu_path)
     pts = mesh.cell_centers().points
     cell_centers = pts[:, [0, 2]]  # (x, z)

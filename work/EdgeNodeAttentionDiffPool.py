@@ -47,9 +47,9 @@ USE_COMPILE = False  # torch.compile for fused kernels
 SCHEDULER_STEP = 200  # epochs per step of lr scheduler
 SELF_LOOP = True
 LEAKY = 0.1  # for LeakyReLU in attention
-ATTENTION_CHANNELS = 96  # attention channels in EdgeNodeAttentionPooling
+ATTENTION_CHANNELS = 30  # attention channels in EdgeNodeAttentionPooling
 POOL_TYPE = (
-    "edge_node"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
+    "diffpool"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
 )
 CLUSTERS_PER_LEVEL = [
     12000,

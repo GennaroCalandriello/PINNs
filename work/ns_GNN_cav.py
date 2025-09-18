@@ -98,15 +98,6 @@ def dataNormalizer(results):
     return t0, centers, U, neighbours, edge_index, xynorm, uvnorm
 
 
-def geometryObjectcyl(xy, center, radius):
-    """Create a geometric object (circle) for the given parameters."""
-    cx, cy = center
-    dist = torch.sqrt((xy[:, 0] - cx) ** 2 + (xy[:, 1] - cy) ** 2)
-    circle = dist < radius
-    dist_norm = dist / radius
-    return dist_norm.unsqueeze(1), circle.unsqueeze(1)
-
-
 def geometryObject(xy, center, width, height):
     """Rectangle: returns (normalized distance, inside_mask).
     dist_norm = max( dx/(w/2), dy/(h/2) )."""
@@ -118,52 +109,6 @@ def geometryObject(xy, center, width, height):
     inside = (dx <= half_w) & (dy <= half_h)
     dist_norm = torch.maximum(dx / (half_w + 1e-12), dy / (half_h + 1e-12))
     return dist_norm.unsqueeze(1), inside.unsqueeze(1)
-
-
-def createGraphDataCyl():
-    """Create a PyTorch Geometric Data object from the normalized data."""
-    results, idx_cells = dataLoader(path_data)
-    t0, centers, U, neighbours, edge_index, xynorm, uvnorm = dataNormalizer(results)
-    U_norm = uvnorm.encode(
-        torch.tensor(U, dtype=torch.float32, device=uvnorm.mean.device)
-    )
-    centers_norm = xynorm.encode(
-        torch.tensor(centers, dtype=torch.float32, device=xynorm.mean.device)
-    )
-
-    centers_norm = torch.as_tensor(centers_norm, dtype=torch.float32, device=device)
-    U_norm = torch.as_tensor(U_norm, dtype=torch.float32, device=device)
-
-    sigma_x = xynorm.std[0].item()
-    sigma_y = xynorm.std[1].item()
-    print(f"Sigma X: {sigma_x}, Sigma Y: {sigma_y}")
-    rad_scaled = radius / (sigma_x)
-    print(f"Scaled radius: {rad_scaled}")
-
-    feature_list = [centers_norm, U_norm]
-    dist_norm, circle = geometryObject(centers_norm, (0, 0), rad_scaled)
-    feature_list.append(dist_norm)
-    feature_list.append(circle)
-
-    x = torch.cat(feature_list, dim=1)
-    y = U_norm
-
-    edge_src, edge_dist = [], []
-    for i, nbs in enumerate(neighbours):
-        for j in nbs:
-            edge_src.append(i)
-            edge_dist.append(j)
-
-    edge_src = torch.tensor(edge_src, dtype=torch.long, device=device)
-    edge_dist = torch.tensor(edge_dist, dtype=torch.long, device=device)
-    edge_index = torch.stack([edge_src, edge_dist], dim=0)
-    relative_positions = (
-        centers_norm[edge_dist] - centers_norm[edge_src]
-    )  # [num edges, 2]
-    distances = torch.norm(relative_positions, dim=1, keepdim=True)  # [num edges, 1]
-    edge_attr = torch.cat([relative_positions, distances], dim=1)
-
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
 
 # ...existing code...
@@ -243,128 +188,6 @@ def createGraphData():
 
 import torch
 from torch_scatter import scatter_add
-
-
-def estimate_normals_from_sdf(pos, edge_index, sdf):
-    """
-    pos: [N,2] (coordinate normalizzate)
-    edge_index: [2,E]
-    sdf: [N,1] distanza firmata (positiva fuori, negativa dentro)
-    ritorna n_hat: [N,2] (normale unitaria)
-    """
-    src, dst = edge_index
-    rij = pos[dst] - pos[src]  # [E,2]
-    lij2 = (rij**2).sum(dim=1, keepdim=True).clamp_min(1e-12)  # [E,1]
-    dphi = sdf[dst] - sdf[src]  # [E,1]
-    gij = (dphi / lij2) * rij  # [E,2]
-    g = scatter_add(gij, dst, dim=0, dim_size=pos.size(0))  # [N,2]
-    n = g / (g.norm(dim=1, keepdim=True).clamp_min(1e-9))
-    n[n != n] = 0.0
-    return n  # [N,2]
-
-
-def build_edge_attr(centers_norm, U_norm, edge_index, use_cp=False):
-    src, dst = edge_index
-    rel = centers_norm[dst] - centers_norm[src]  # [E,2] = (dx,dy)
-    dist = torch.norm(rel, dim=1, keepdim=True)  # [E,1]
-    if not use_cp:
-        return torch.cat([rel, dist], dim=1)  # edge_dim = 3
-    # feature orientata per i vortici (consigliata se rialleni)
-    dvel = U_norm[dst] - U_norm[src]  # [E,2] = (du,dv)
-    cp = rel[:, 0:1] * dvel[:, 1:2] - rel[:, 1:2] * dvel[:, 0:1]  # [E,1]
-    return torch.cat([rel, dist, cp], dim=1)  # edge_dim = 4
-
-
-def createGraphData(use_cp=False, add_boundary_normals=False):
-    """Crea un Data PyG con feature di boundary integrate (SDF firmata, normale, u_n/u_t)."""
-    results, idx_cells = dataLoader(path_data)
-    t0, centers, U, neighbours, edge_index_list, xynorm, uvnorm = dataNormalizer(
-        results
-    )
-
-    # --- tensori normalizzati ---
-    centers_norm = xynorm.encode(
-        torch.tensor(centers, dtype=torch.float32, device=device)
-    )  # [N,2]
-    U_norm = uvnorm.encode(torch.tensor(U, dtype=torch.float32, device=device))  # [N,2]
-
-    # --- parametri fisici del rettangolo (già hai questi nel tuo snippet) ---
-    sigma_x = xynorm.std[0].item()
-    sigma_y = xynorm.std[1].item()
-    cx_phys, cy_phys = 1050.0, 100.0
-    rect_width_phys, rect_height_phys = 100.0, 200.0
-
-    center_norm = torch.tensor(
-        [
-            (cx_phys - xynorm.mean[0].item()) / xynorm.std[0].item(),
-            (cy_phys - xynorm.mean[1].item()) / xynorm.std[1].item(),
-        ],
-        dtype=torch.float32,
-        device=device,
-    )
-    rect_width_norm = rect_width_phys / sigma_x
-    rect_height_norm = rect_height_phys / sigma_y
-
-    # --- SDF/indicatore dal tuo geometryObject (qui arrivano: distanza>=0, mask{0/1}) ---
-    #  Nota: per avere SDF firmata usiamo il segno di 'rect_mask'
-    rect_dist_norm, rect_mask = geometryObject(
-        centers_norm,
-        (center_norm[0].item(), center_norm[1].item()),
-        rect_width_norm,
-        rect_height_norm,
-    )  # shape: [N,1] e [N,1]
-
-    # SDF firmata: positiva FUORI, negativa DENTRO
-    sdf = torch.where(rect_mask > 0.5, -rect_dist_norm, rect_dist_norm)  # [N,1]
-
-    # --- edge_index dai neighbours (serve per stimare le normali) ---
-    edge_src, edge_dst = [], []
-    for i, nbs in enumerate(neighbours):
-        for j in nbs:
-            edge_src.append(i)
-            edge_dst.append(j)
-    edge_src = torch.tensor(edge_src, dtype=torch.long, device=device)
-    edge_dst = torch.tensor(edge_dst, dtype=torch.long, device=device)
-    edge_index = torch.stack([edge_src, edge_dst], dim=0)  # [2,E]
-
-    # --- normali e componenti vel. su base (solo se le vuoi in x e rialleni) ---
-    if add_boundary_normals:
-        n_hat = estimate_normals_from_sdf(centers_norm, edge_index, sdf)  # [N,2]
-        t_hat = torch.stack([-n_hat[:, 1], n_hat[:, 0]], dim=1)  # [N,2]
-        u_n = (U_norm * n_hat).sum(dim=1, keepdim=True)  # [N,1]
-        u_t = (U_norm * t_hat).sum(dim=1, keepdim=True)  # [N,1]
-    else:
-        n_hat = torch.zeros_like(centers_norm)
-        u_n = torch.zeros((centers_norm.size(0), 1), device=device)
-        u_t = torch.zeros((centers_norm.size(0), 1), device=device)
-
-    # --- feature nodi x ---
-    # MINIMO (compatibile col tuo modello attuale): coord + vel + sdf + mask
-    # x = torch.cat([centers_norm, U_norm, sdf, rect_mask], dim=1)
-
-    # COMPLETO (se rialleni con boundary-aware): aggiungi n_hat, u_n, u_t
-    x = torch.cat([centers_norm, U_norm, sdf, rect_mask, n_hat, u_n, u_t], dim=1)
-    #    colonne: 0:xn 1:yn  2:un 3:vn  4:sdf 5:mask 6:nx 7:ny  8:u_n 9:u_t   --> in_ch=10
-
-    # --- feature archi edge_attr ---
-    edge_attr = build_edge_attr(centers_norm, U_norm, edge_index, use_cp=use_cp)
-    #    se use_cp=False: edge_dim=3  (dx,dy,dist)
-    #    se use_cp=True : edge_dim=4  (dx,dy,dist,cp)
-
-    # --- target ---
-    y = U_norm  # [N,2] (se vuoi aggiungere p, aumenta out_ch di conseguenza)
-
-    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
-
-    # (opzionale ma utile): porta sdf/n_hat anche come campi dedicati (servono in pooling/loss)
-    data.sdf = sdf
-    data.n_hat = n_hat
-    data.mask = rect_mask
-
-    return data
-
-
-# ...existing code...
 
 
 class GNNAutoencoder(nn.Module):

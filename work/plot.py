@@ -5,7 +5,8 @@ from matplotlib.patches import Rectangle
 # from ns_gnn_diffpool import *
 # from correct import *
 # from correct import *
-from EdgeNodeAttentionDiffPool import *
+# from EdgeNodeAttentionDiffPool import *
+from ENAD2 import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -13,8 +14,8 @@ geometry = "rectangle"  # "circle" or "rectangle"
 
 
 def animate_patch_time_series_gnn(
-    out_gif="mehmeh.gif",
-    model_path="model/gnn_ae.pth",
+    out_gif="mehmeh2.gif",
+    model_path="model/gnn_autoencoder.pth",
 ):
     radius = 3000
     import matplotlib.tri as mtri
@@ -32,12 +33,24 @@ def animate_patch_time_series_gnn(
     edge_dim = data.edge_attr.size(-1)
     out_ch = data.y.size(-1)
 
-    model = GraphAutoEncoder(
-        in_ch=in_ch,
+    # model = GraphAutoEncoder(
+    #     in_ch=in_ch,
+    #     edge_in_dim=edge_dim,
+    #     out_ch=out_ch,
+    #     clusters_per_level=CLUSTERS_PER_LEVEL,
+    # ).to(device)
+
+    model = GNNAutoEncoder(
+        input_dim=in_ch,
+        hidden_dim=HIDDEN_DIM,
+        latent_dim=LATENT_DIM,
+        output_dim=out_ch,
         edge_dim=edge_dim,
-        out_ch=out_ch,
-        clusters_per_level=CLUSTERS_PER_LEVEL,
+        num_layers=NUM_LAYERS,
+        use_pool=USE_POOL,
+        pool_clusters=POOL_CLUSTERS,
     ).to(device)
+
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     # --- Normalize data ---
@@ -64,11 +77,6 @@ def animate_patch_time_series_gnn(
     dist2 = (tri_centers_x - cx) ** 2 + (tri_centers_y - cy) ** 2
     mask_tri = dist2 < r_cyl_dec**2
     triang.set_mask(mask_tri)
-
-    # --- Load model ---
-    # Figure out input_dim/output_dim from a single sample
-    input_dim = data.x.shape[1]
-    output_dim = 3
 
     # --- Collect velocity magnitude for all frames ---
     mag_vals = []
@@ -171,10 +179,20 @@ def animate_patch_time_series_gnn(
     ani = FuncAnimation(
         fig, update, frames=len(results), interval=60, blit=False, repeat=True
     )
-    ani.save(out_gif, writer="imagemagick", fps=20)
+    ani.save(out_gif, writer="pillow", fps=20)
     print("✅ Animation saved as", out_gif)
     return ani
 
 
+def plotLoss():
+    loss = np.loadtxt("model/loss_history.txt")
+    plt.plot(loss)
+    plt.yscale("log")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.show()
+
+
 if __name__ == "__main__":
+    # plotLoss()
     animate_patch_time_series_gnn()
