@@ -26,7 +26,7 @@ GNOLayer (MessagePassing):
 """
 
 # hyperpar
-num_layers = 4
+num_layers = 6
 hidden_dim = 50
 latent_dim = 10
 epochs = 3000
@@ -36,6 +36,9 @@ assign_dim = 5  # num_clusters for DiffPool
 path_data = "patches/experiments20k.pkl"
 # path_data = "patches/patch_5k_uniform.pkl"
 radius = 3000
+DROPOUT = 0.0
+MODEL_PATH = "model/gnn_autoencoder.pth"
+LOSS_PATH = "model/loss_history_gnn_autoencoder.npy"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -281,7 +284,7 @@ class GNNDecoder(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(DROPOUT),
             nn.Linear(hidden_dim, output_dim),
         )
 
@@ -298,14 +301,14 @@ class GNOLayer(MessagePassing):
             nn.Linear(2 * in_channels + edge_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(DROPOUT),
             nn.Linear(hidden_dim, out_channels),
         )
         self.update_mlp = nn.Sequential(
             nn.Linear(in_channels + out_channels, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.1),
+            nn.Dropout(DROPOUT),
             nn.Linear(hidden_dim, out_channels),
         )
         self.residual = in_channels == out_channels
@@ -322,6 +325,8 @@ class GNOLayer(MessagePassing):
 
 
 def train(data, latent_dim=latent_dim, epochs=epochs):
+    from tqdm import trange
+
     """Train the GNN autoencoder."""
     print("Starting training...")
     results, _ = dataLoader(path_data)
@@ -341,8 +346,9 @@ def train(data, latent_dim=latent_dim, epochs=epochs):
 
     data = data.to(device)
     loss_history = []
+    loop = trange(epochs, desc="Training", dynamic_ncols=True)
 
-    for epoch in range(epochs):
+    for epoch in loop:
         optimizer.zero_grad()
         pred = model(data)
         u_pred = pred[:, 0]
@@ -361,14 +367,18 @@ def train(data, latent_dim=latent_dim, epochs=epochs):
         loss.backward()
         optimizer.step()
         scheduler.step()
+        loop.set_postfix(
+            {
+                "loss": f"{loss.item():.6f}",
+            }
+        )
 
-        if epoch % 1 == 0:
-            print(f"Epoch {epoch}, Loss: {loss.item()}")
+        if epoch % 2 == 0:
             loss_history.append(loss.item())
     print(" ✅ Training complete.")
 
-    torch.save(model.state_dict(), "model/gnn_autoencoder.pth")
-    np.save("model/loss_history.npy", np.array(loss_history))
+    torch.save(model.state_dict(), MODEL_PATH)
+    np.save(LOSS_PATH, np.array(loss_history))
     print(" ✅ Model and loss history saved.")
 
 

@@ -23,12 +23,12 @@ NUM_LAYERS = 6
 USE_EDGE_ATTN = True
 USE_NODE_ATTN = True
 USE_ST_GUMBEL = True
-USE_POOL = False
+USE_POOL = True
 DROPOUT = 0.1
 LEAKY_SLOPE = 0.2
 
 TAU = 0.6
-POOL_CLUSTERS = 100
+POOL_CLUSTERS = 120
 LR = 1e-3
 WEIGHT_DECAY = 1e-5
 SCHEDULER_TYPE = "StepLR"  # "StepLR" or "CosineAnnealingLR"
@@ -166,7 +166,8 @@ class AttentionGNOLayer(MessagePassing):
         # print("Edge attr in forward of AttentionGNOLayer", edge_attr)
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
         out = self.norm_post(out)
-        return out + x if self.residual else out
+        # return out + x if self.residual else out
+        return out
 
     def message(self, x_i, x_j, edge_attr, index):
         # x_i has shape [E, in_channels] (target node features)
@@ -175,7 +176,11 @@ class AttentionGNOLayer(MessagePassing):
         xi = self.lin_node(x_i)
         xj = self.lin_node(x_j)
         ej = self.lin_edge(edge_attr)
+        # print("xi shape", xi.shape)
+        # print("xj shape", xj.shape)
+        # print("ej shape", ej.shape)
         cat_for_msg = torch.cat([xi, xj, ej], dim=-1)
+        # print("cat_for_msg shape", cat_for_msg.shape)
         size_i = int(index.max().item()) + 1  # number of target nodes
 
         # node attentions alpha_ij: softmax over neighbors of node i
@@ -694,8 +699,11 @@ def train(
 if __name__ == "__main__":
 
     data = createGraphData()
+    print(data.size())
     input_dim = data.x.size(1)
     edge_dim = data.edge_attr.size(1)
+    ydata = data.y.size(1)
+
     output_dim = data.y.size(1)
 
     model = GNNAutoEncoder(

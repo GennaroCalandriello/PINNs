@@ -4,15 +4,12 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.patches import Circle as MPCircle, Rectangle as MPRect
 
 # ====== tuoi import ======
 from ns_GNN_KF import dataLoader, dataNormalizer, createGraphData
-from EdgeNodeAttentionDiffPool import (
-    GraphAutoEncoder,
-    CLUSTERS_PER_LEVEL,
-)  # usa la tua classe
+from EdgeNodeAttentionDiffPool import GraphAutoEncoder, CLUSTERS_PER_LEVEL  # tua classe
 
 # ====== CONFIG ======
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,8 +160,7 @@ def sdf_features_normalized(centers_norm, obstacles_norm):
             sdf = torch.minimum(sdf, d)
             inside_any |= d <= 0
         else:
-            px = x
-            py = y
+            px, py = x, y
             x0, y0, w, h = o["x0"], o["y0"], o["w"], o["h"]
             dx0 = torch.maximum(x0 - px, torch.zeros_like(px))
             dx1 = torch.maximum(px - (x0 + w), torch.zeros_like(px))
@@ -251,8 +247,9 @@ def animate_error_time_series_gnn(
             U_dec, dtype=torch.float32, device=device
         )  # ground truth (decoded)
 
+        # encoding
         centers_norm = xynorm.encode(centers_dec)  # [N,2]
-        U_norm = uvnorm.encode(U_dec)  # [N,2] (se U_norm è parte delle feature input)
+        U_norm = uvnorm.encode(U_dec)  # [N,2] (se in training era parte delle feature)
 
         # feature geometriche in norm
         dist_norm, indicator = sdf_features_normalized(centers_norm, obstacles_norm)
@@ -260,7 +257,7 @@ def animate_error_time_series_gnn(
         # input features x (adatta a quello che hai usato in training)
         x = torch.cat([centers_norm, U_norm, dist_norm, indicator], dim=1)
 
-        # edge_index & edge_attr
+        # edge_index & edge_attr (da neighbors)
         edge_src, edge_dst = [], []
         for i, nbs in enumerate(neighbors_i):
             for j in nbs:
@@ -286,13 +283,25 @@ def animate_error_time_series_gnn(
         )
 
         with torch.no_grad():
-            pred_norm = model(data_t)  # [N, out_ch], supponiamo (u,v,...) normalizzati
+            pred_out = model(data_t)
+            # supporta sia tensore puro che (pred, aux)
+            if isinstance(pred_out, tuple) or isinstance(pred_out, list):
+                pred_norm = pred_out[0]
+            else:
+                pred_norm = pred_out
+
             # decodifica ai valori fisici
-            u_pred = uvnorm.decode(pred_norm[:, 0], idx=0)  # [N]
-            v_pred = uvnorm.decode(pred_norm[:, 1], idx=1)  # [N]
+            # se uvnorm.decode supporta batch canale→usa vettori, altrimenti per canale
+            try:
+                pred_dec = uvnorm.decode(pred_norm)  # [N,2]
+                u_pred, v_pred = pred_dec[:, 0], pred_dec[:, 1]
+            except Exception:
+                u_pred = uvnorm.decode(pred_norm[:, 0], idx=0)
+                v_pred = uvnorm.decode(pred_norm[:, 1], idx=1)
             u_gt = U_dec[:, 0]
             v_gt = U_dec[:, 1]
 
+            # error modes
             if error_mode == "u":
                 e = (u_pred - u_gt).abs().detach().cpu().numpy()
             elif error_mode == "v":
@@ -309,7 +318,9 @@ def animate_error_time_series_gnn(
                     .numpy()
                 )
 
-            err_vals.append(e[mask_fluid])
+            # conserva solo nodi fluido
+            e_fluid = e[mask_fluid]
+            err_vals.append(e_fluid)
 
     err_vals = np.array(err_vals)  # [T, N_fluid]
     vmin = 0.0
@@ -339,6 +350,7 @@ def animate_error_time_series_gnn(
             )
         ax.add_patch(patch)
 
+    # primo frame
     quad = ax.tricontourf(
         triang, err_vals[0], levels=LEVELS, cmap=CMAP, vmin=vmin, vmax=vmax
     )
@@ -351,22 +363,30 @@ def animate_error_time_series_gnn(
     title = ax.set_title("t = 0.00")
     ax.set_aspect("equal", adjustable="box")
 
-    # update
+    # update: rimuove SOLO le collezioni del vecchio contourf
     def update(frame):
         nonlocal quad
-        for c in ax.collections:  # rimuovi SOLO il vecchio contourf
-            c.remove()
+        # rimuovi le collezioni del precedente contourf
+        for coll in quad.collections:
+            coll.remove()
+        # ridisegna
         quad = ax.tricontourf(
             triang, err_vals[frame], levels=LEVELS, cmap=CMAP, vmin=vmin, vmax=vmax
         )
         t_now = results[frame][0]
         title.set_text(f"t = {t_now:.3f}")
-        return []
+        return quad.collections
 
     ani = FuncAnimation(
         fig, update, frames=len(results), interval=60, blit=False, repeat=True
     )
-    ani.save(out_gif, writer="imagemagick", fps=FPS)
+
+    # salvataggio: prova imagemagick, fallback a pillow
+    try:
+        ani.save(out_gif, writer="imagemagick", fps=FPS)
+    except Exception:
+        ani.save(out_gif, writer=PillowWriter(fps=FPS))
+
     print("✅ Error animation saved as", out_gif)
     print(" Max and min errors over all frames:", err_vals.max(), err_vals.min())
     return ani
@@ -374,12 +394,6 @@ def animate_error_time_series_gnn(
 
 # =========================================================
 if __name__ == "__main__":
-    animate_error_time_series_gnn = animate_error_time_series_gnn = (
-        animate_error_time_series_gnn
-        if "animate_error_time_series_gnn" in globals()
-        else None
-    )
-    # esegui
     animate_error_time_series_gnn(
         out_gif=OUT_GIF, model_path=MODEL_PATH, error_mode=ERROR_MODE
     )

@@ -27,7 +27,7 @@ USE_EDGE_ATTN = True
 USE_NODE_ATTN = True
 USE_ST_GUMBEL = True  # solo diagnostica
 USE_POOL = True
-DROPOUT = 0.10
+DROPOUT = 0.1
 LEAKY_SLOPE = 0.20
 
 TAU = 0.6
@@ -36,6 +36,8 @@ LR = 1e-3
 WEIGHT_DECAY = 1e-5
 SCHEDULER_TYPE = "StepLR"  # "StepLR" | "CosineAnnealingLR"
 SCHEDULER_GAMMA = 0.9
+CLUSTERS = [10000, 5000, 1000]  # se vuoi pool multipli
+NUM_CLUSTERS = len(CLUSTERS)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -395,6 +397,20 @@ class GNNEncoderWithPool(nn.Module):
             tau=TAU,
             topk=8,
         )
+        # qui posso ridurre progressivamente il numero di clusters, il num iniziale corrisponde al num dei nodi
+        # self.pool = nn.ModuleList(
+        #     [
+        #         EdgeNodeAttentionPool(
+        #             in_dim=hidden_dim,
+        #             hidden=hidden_dim,
+        #             C=c,
+        #             use_st_gumbel=USE_ST_GUMBEL,
+        #             tau=TAU,
+        #             topk=8,
+        #         )
+        #         for c in CLUSTERS
+        #     ]
+        # )
 
         self.layers_post = nn.ModuleList(
             [
@@ -651,12 +667,15 @@ if __name__ == "__main__":
     assert hasattr(data, "pos"), "data.pos è richiesto (coordinate normalizzate)."
 
     # Sanity: coalesce edge_index una volta all'inizio (opzionale)
-    data.edge_index = coalesce_undirected(data.edge_index, num_nodes=data.num_nodes)
+    # data.edge_index = coalesce_undirected(data.edge_index, num_nodes=data.num_nodes)
 
     input_dim = data.x.size(1)
     edge_dim = geom_edge_dim_from_pos_dim(
         data.pos.size(1)
     )  # decoder/encoder usano edge geo
+    print(f"Edge features dimension (geometric): {edge_dim}")
+    edge_index = data.edge_index
+    print(f"Initial edges: {edge_index.size()}")
     output_dim = data.y.size(1)
 
     model = GNNAutoEncoder(

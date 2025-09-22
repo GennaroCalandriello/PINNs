@@ -49,7 +49,7 @@ SELF_LOOP = True
 LEAKY = 0.1  # for LeakyReLU in attention
 ATTENTION_CHANNELS = 30  # attention channels in EdgeNodeAttentionPooling
 POOL_TYPE = (
-    "diffpool"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
+    "topk"  # 'topk', 'diffpool', 'edge_node' (diffpool dà qualche errore ancora!)
 )
 CLUSTERS_PER_LEVEL = [
     12000,
