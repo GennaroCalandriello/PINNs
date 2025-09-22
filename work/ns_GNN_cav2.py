@@ -34,6 +34,7 @@ scheduler_step = 500
 assign_dim = 5  # num_clusters for DiffPool
 # path_data = "patches/patch_max_uniformCyl.pkl"  # Update with actual path
 path_data = "patches/experiments20k.pkl"
+# path_data = "patches/experiments.pkl"
 # path_data = "patches/patch_5k_uniform.pkl"
 radius = 3000
 DROPOUT = 0.0
@@ -196,6 +197,10 @@ def createGraphData():
     dirn = rel / (dist + 1e-12)
     invr = 1.0 / (dist + 1e-12)
     edge_attr = torch.cat([rel, dist, dirn, invr], dim=1)  # [E,5]
+
+    ea_norm = GaussianNormalizer(edge_attr)
+    ea_norm.cuda()
+    edge_attr = ea_norm.encode(edge_attr)
 
     return Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr, y=y)
 

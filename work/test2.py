@@ -9,8 +9,8 @@ import numpy as np
 from torch_geometric.nn import MessagePassing
 
 # --- IPERPARAMETRI ---
-HIDDEN_CHANNELS = (64, 64, 64)  # can be a tuple/list
-C = 200
+HIDDEN_CHANNELS = (64, 64, 64, 64, 64)  # can be a tuple/list
+C = 150
 C_LIST = [512, 256, 64]
 
 BOTTLENECKLATENTSPACE = 50  # dimensione spazio latente globale
@@ -25,8 +25,9 @@ USE_LN = False
 EPOCHS = 2500
 MODEL_PATH = "model/graph_autoencoder_diffpool_test2.pth"
 LOSS_PATH = "model/loss_history_diffpool_test2.npy"
-KIND_CONV = "ChebConv"  # "GMMConv", "NNConv", "ChebConv", "GCNConv", "GATConv"
-EDGEATTENTIONHIDDEN = 200
+KIND_CONV = "GMMConv"  # "GMMConv", "NNConv", "ChebConv", "GCNConv", "GATConv"
+EDGEATTENTIONHIDDEN = 256
+LEAKY_SLOPE = 0.2
 
 # ==================== Small utils ====================
 
@@ -62,7 +63,7 @@ class EdgeAttention(nn.Module):  # <<< NEW (typo fix)
         super().__init__()
         self.scorer = nn.Sequential(
             nn.Linear(2 * node_dim + edge_dim, hidden),
-            nn.LeakyReLU(0.1),
+            nn.LeakyReLU(LEAKY_SLOPE),
             nn.Linear(hidden, 1),
         )
 
@@ -79,7 +80,7 @@ class NodeAttention(nn.Module):
         super().__init__()
         self.scorer = nn.Sequential(
             nn.Linear(node_dim, hidden),
-            nn.LeakyReLU(0.1),
+            nn.LeakyReLU(LEAKY_SLOPE),
             nn.Linear(hidden, 1),
         )
 
@@ -497,8 +498,8 @@ if __name__ == "__main__":
     loss_hist = []
 
     loop = trange(EPOCHS, desc="Training", dynamic_ncols=True)
-    edge_norm = EdgeNormalizer(data.edge_attr)
-    data.edge_attr = edge_norm.encode(data.edge_attr)
+    # edge_norm = EdgeNormalizer(data.edge_attr)
+    # data.edge_attr = edge_norm.encode(data.edge_attr)
     for epoch in loop:
         model.train()
         opt.zero_grad()
@@ -506,8 +507,8 @@ if __name__ == "__main__":
         recon = F.mse_loss(y_hat, data.y)
 
         # --- Regolarizzazioni semplici su S ---
-        L_ent, L_link = model.regularization_losses(aux)
-        loss = recon + model.lambda_link * L_link  # <<< NEW
+        # L_ent, L_link = model.regularization_losses(aux)
+        loss = recon  # <<< NEW
 
         loss.backward()
         opt.step()
@@ -516,8 +517,6 @@ if __name__ == "__main__":
         loop.set_postfix(
             {
                 "recon": f"{recon.item():.6f}",
-                "L_ent": f"{L_ent.item():.6f}",
-                "L_link": f"{L_link.item():.6f}",
                 "loss": f"{loss.item():.6f}",
             }
         )

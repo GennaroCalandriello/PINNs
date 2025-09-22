@@ -1,4 +1,4 @@
-from test2 import *
+from testROM import *
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,7 +13,38 @@ from torch_geometric.data import Data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 geometry = "rectangle"  # "circle" or "rectangle"
-out_gif = "test2.gif"
+out_gif = "anim_testROM.gif"
+
+# Rettangolo axis-aligned (angolo in basso-sx)
+RECT_X0 = 1000.0
+RECT_Y0 = None  # se None: usa min(ydec)
+RECT_W = 100.0
+RECT_H = 200.0
+
+
+def build_fluid_masks(x, y, obstacles):
+
+    inside_any = np.zeros_like(x, dtype=bool)
+
+    def inside_rect_axis_aligned(x, y, x0, y0, w, h):
+        return (x >= x0) & (x <= x0 + w) & (y >= y0) & (y <= y0 + h)
+
+    for obs in obstacles:
+        inside_any |= inside_rect_axis_aligned(
+            x, y, obs["x0"], obs["y0"], obs["w"], obs["h"]
+        )
+    mask_points_fluid = ~inside_any
+
+    def tri_mask_fn(tri_xc, tri_yc):
+        tri_inside = np.zeros_like(tri_xc, dtype=bool)
+        for obs in obstacles:
+
+            tri_inside |= inside_rect_axis_aligned(
+                tri_xc, tri_yc, obs["x0"], obs["y0"], obs["w"], obs["h"]
+            )
+        return tri_inside
+
+    return mask_points_fluid, tri_mask_fn
 
 
 def build_static_graph_and_norms(
@@ -75,6 +106,18 @@ def build_static_graph_and_norms(
     # Triangolazione per plotting IN COORDINATE FISICHE (decodifica su assi reali)
     centers0_np = centers0.detach().cpu().numpy()
     xdec, ydec = centers0_np[:, 0], centers0_np[:, 1]
+    # triangolazione sui soli punti fluido
+    obstacles_dec = build_obstacles(xdec, ydec)
+    mask_fluid, tri_mask_fn = build_fluid_masks(xdec, ydec, obstacles_dec)
+    xdec_fluid = xdec[mask_fluid]
+    ydec_fluid = ydec[mask_fluid]
+    triang = mtri.Triangulation(xdec_fluid, ydec_fluid)
+    tri_pts = np.stack(
+        [xdec_fluid[triang.triangles], ydec_fluid[triang.triangles]], axis=-1
+    )
+    tri_centers_x = tri_pts[:, :, 0].mean(axis=1)
+    tri_centers_y = tri_pts[:, :, 1].mean(axis=1)
+    triang.set_mask(tri_mask_fn(tri_centers_x, tri_centers_y))
     triang = mtri.Triangulation(
         xdec, ydec
     )  # nessuna maschera, o aggiungila qui se vuoi
@@ -93,6 +136,22 @@ def build_static_graph_and_norms(
         "results": results,
     }
     return static
+
+
+def build_obstacles(decoded_x, decoded_y):
+    obstacles = []
+    y0 = float(np.min(decoded_y)) if RECT_Y0 is None else float(RECT_Y0)
+    obstacles.append(
+        {
+            "type": "rect",
+            "x0": float(RECT_X0),
+            "y0": y0,
+            "w": float(RECT_W),
+            "h": float(RECT_H),
+        }
+    )
+
+    return obstacles
 
 
 def build_frame_data(static, U_frame):
@@ -136,7 +195,8 @@ def animate_patch_time_series_gnn(
     triang = static["triang"]
     xdec, ydec = static["xdec"], static["ydec"]
     uvnorm = static["uvnorm"]
-
+    obstacles_dec = build_obstacles(xdec, ydec)
+    mask_fluid, tri_mask_fn = build_fluid_masks(xdec, ydec, obstacles_dec)
     # ==== prepara un Data "di base" per dedurre IN/EDGE/OUT dims ====
     _, _, U0, _, _ = results[0]
     data0 = build_frame_data(static, U0)
@@ -145,17 +205,15 @@ def animate_patch_time_series_gnn(
     OUT_DIM = data0.y.size(1)  # 2 (u,v)
 
     # ==== modello ====
-    model = GraphAutoencoderDiffPool(
-        in_dim=IN_DIM,
+    model = GraphAutoEncoder(
+        in_ch=IN_DIM,
         edge_dim=EDGE_DIM,
-        out_dim=OUT_DIM,
-        hidden_channels=HIDDEN_CHANNELS,
-        C=C,
-        bottleneck=BOTTLENECKLATENTSPACE,
-        conv=KIND_CONV,
-        skip=True,
-        dropout=DROPOUT,
+        out_ch=OUT_DIM,
+        hidden=HIDDEN,
+        latent=LATENT,
+        clusters_per_level=CLUSTERS_PER_LEVEL,
     ).to(device)
+
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
 
@@ -164,7 +222,7 @@ def animate_patch_time_series_gnn(
     with torch.no_grad():
         for t, centers, U, neighbors, edge_index_raw in results:
             data_t = build_frame_data(static, U)
-            y_hat, _ = model(data_t)  # (N,2)
+            y_hat = model(data_t)  # (N,2)
             # decode in unità fisiche per plotting
             u_pred = uvnorm.decode(y_hat[:, 0], idx=0).cpu().numpy()
             v_pred = uvnorm.decode(y_hat[:, 1], idx=1).cpu().numpy()
@@ -175,6 +233,19 @@ def animate_patch_time_series_gnn(
 
     # ==== setup figura ====
     fig, ax = plt.subplots(figsize=(7, 6))
+    for obs in obstacles_dec:
+        rectangle = Rectangle(
+            (obs["x0"], obs["y0"]),
+            obs["w"],
+            obs["h"],
+            color="k",
+            fill=True,
+            linewidth=0.0,
+            linestyle="",
+            zorder=10,
+        )
+        ax.add_patch(rectangle)
+
     cntr = ax.tricontourf(
         triang, mag_vals[0], levels=300, cmap="jet", vmin=vmin, vmax=vmax
     )
@@ -185,21 +256,6 @@ def animate_patch_time_series_gnn(
     ax.set_aspect("equal", adjustable="box")
 
     title = ax.set_title("t = 0.00")
-
-    # overlay rettangolo fisico
-    rect_x, rect_y = 1000, np.min(ydec)
-    rect_w, rect_h = 100, 200
-    rectangle = Rectangle(
-        (rect_x, rect_y),
-        rect_w,
-        rect_h,
-        color="k",
-        fill=False,
-        linewidth=0.0,
-        linestyle="",
-        zorder=10,
-    )
-    ax.add_patch(rectangle)
 
     def update(frame):
         # pulisci vecchie collections del contour
