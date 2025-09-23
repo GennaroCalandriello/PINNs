@@ -21,26 +21,28 @@ from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObj
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 120  # best con 72 ma errore alto
+HIDDEN = 100  # best con 72 ma errore alto
 LATENT = 60  # best con 42 ma errore alto
-EDGE_HIDDEN = 120  # best con 52 ma errore alto
+EDGE_HIDDEN = 100  # best con 52 ma errore alto
 DROP = 0.0
 LR = 1e-3
-EPOCHS = 1000
+EPOCHS = 500
 BATCH_SIZE_NODES = 20000  # best con 16000 ma errore alto
-NEIGHBORS = [80, 80, 80, 80]
-GRAD_CLIP = 0.8
+NEIGHBORS = [80, 80, 80]
+GRAD_CLIP = 1.0
 
 SCHEDULER_STEP = 200
 
 MODEL_PATH = "model/gnn_ae_diffpool1.pth"
 LOSS_PATH = "model/loss_gnn_ae_diffpool1.txt"
+MLP_VARIANT = 1  # 1 per simil MeshGraphNet, 0 per MeshCutriStyle
+AGGREGATION = "add"  # "add" | "mean" | "max" ---- prima era "mean" ora "add"
 
 # BOOL FLAGS
 USE_AMP = True
 USE_COMPILE = False
 RETURN_AUX = False  # return aux losses (link + entropy) from DiffPool
-SELF_LOOP = True
+SELF_LOOP = False  # prima era True
 
 # DiffPool hierarchy (number of clusters per pooling level)
 CLUSTERS_PER_LEVEL: List[int] = [800]  # best con [800] ma errore alto
@@ -154,23 +156,46 @@ class EdgeGNNLayer(MessagePassing):
         edge_dim: Optional[int],
         hidden: int = EDGE_HIDDEN,
         dropout: float = DROP,
-        aggr: str = "mean",
+        aggr: str = AGGREGATION,
     ):
         super().__init__(aggr=aggr, node_dim=0)
-        self.mlp_msg = nn.Sequential(
-            nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
-            nn.LayerNorm(hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, out_ch),
-        )
-        self.mlp_upd = nn.Sequential(
-            nn.Linear(in_ch + out_ch, hidden),
-            nn.LayerNorm(hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, out_ch),
-        )
+        if MLP_VARIANT == 0:
+            self.mlp_msg = nn.Sequential(
+                nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
+                nn.LayerNorm(hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, out_ch),
+            )
+            self.mlp_upd = nn.Sequential(
+                nn.Linear(in_ch + out_ch, hidden),
+                nn.LayerNorm(hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, out_ch),
+            )
+        elif MLP_VARIANT == 1:
+            self.mlp_msg = nn.Sequential(
+                nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, out_ch),
+                nn.LayerNorm(out_ch),
+            )
+            self.mlp_upd = nn.Sequential(
+                nn.Linear(in_ch + out_ch, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, out_ch),
+                nn.LayerNorm(out_ch),
+            )
+
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(out_ch)
         self.use_res = in_ch == out_ch
@@ -199,7 +224,7 @@ class EdgeGNNLayer(MessagePassing):
         out = self.propagate(edge_index_sl, x=x, edge_attr=edge_attr_sl)
         h = torch.cat([x, out], dim=-1)
         h = self.mlp_upd(h)
-        h = self.norm(h)
+        # h = self.norm(h)
         if self.use_res:
             h = h + x
         h = F.gelu(h)
@@ -229,7 +254,7 @@ class DiffPoolBlock(nn.Module):
         self.assign = nn.Sequential(
             nn.Linear(ch, ch),
             nn.GELU(),
-            nn.LayerNorm(ch),
+            # nn.LayerNorm(ch),
             nn.Linear(ch, num_clusters),
             nn.GELU(),
             nn.LayerNorm(num_clusters),
