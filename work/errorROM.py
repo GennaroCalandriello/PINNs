@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.patches import Rectangle
-from plotROM import (
+from trainAndPlotROM import (
     build_static_graph_and_norms,
     build_fluid_masks,
     build_obstacles,
@@ -193,6 +193,7 @@ def animate_error_time_series_gnn(
 
     # update: rimuove SOLO le collezioni del vecchio contourf
     def update(frame):
+        print("Animating error frame", frame)
         nonlocal quad
         # rimuovi le collezioni del precedente contourf
         for coll in ax.collections:
@@ -219,6 +220,12 @@ def animate_error_time_series_gnn(
 
 # =========================================================
 if __name__ == "__main__":
+    from trainAndPlotROM import *
+    from testROM import *
+
+    main()
+    animate_patch_time_series_gnn()
     animate_error_time_series_gnn(
         out_gif=OUT_GIF, model_path=MODEL_PATH, error_mode=ERROR_MODE
     )
+    plotLoss()

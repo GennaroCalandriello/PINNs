@@ -21,15 +21,15 @@ from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObj
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 70
-LATENT = 30
-EDGE_HIDDEN = 50
+HIDDEN = 120  # best con 72 ma errore alto
+LATENT = 60  # best con 42 ma errore alto
+EDGE_HIDDEN = 120  # best con 52 ma errore alto
 DROP = 0.0
 LR = 1e-3
-EPOCHS = 2000
-BATCH_SIZE_NODES = 12000
-NEIGHBORS = [80, 80, 80]
-GRAD_CLIP = 1.0
+EPOCHS = 1000
+BATCH_SIZE_NODES = 20000  # best con 16000 ma errore alto
+NEIGHBORS = [80, 80, 80, 80]
+GRAD_CLIP = 0.8
 
 SCHEDULER_STEP = 200
 
@@ -43,7 +43,7 @@ RETURN_AUX = False  # return aux losses (link + entropy) from DiffPool
 SELF_LOOP = True
 
 # DiffPool hierarchy (number of clusters per pooling level)
-CLUSTERS_PER_LEVEL: List[int] = [1350]
+CLUSTERS_PER_LEVEL: List[int] = [800]  # best con [800] ma errore alto
 
 
 # =========================
@@ -542,7 +542,7 @@ def train(
         n_batches = 0
 
         TAU = max(
-            0.60, 1.0 - 0.75 * (ep / epochs)
+            0.50, 1.0 - 0.75 * (ep / epochs)
         )  # annealing tau (se vuoi: fisso a 1.0)
 
         for batch in loader:
@@ -612,8 +612,8 @@ def train(
 
         # Log ordinato: loss media epoca + lr corrente + tau
         log_dict = {
-            "loss": f"{avg:.6f}",
-            "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+            "loss": f"{avg:.8f}",
+            "lr": f"{scheduler.get_last_lr()[0]:.5e}",
             "tau": f"{TAU:.3f}",
         }
         if RETURN_AUX and n_batches > 0:
@@ -660,5 +660,5 @@ def main():
     print(f"Saved model, loss: {MODEL_PATH}, {LOSS_PATH}")
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
