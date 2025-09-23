@@ -21,24 +21,29 @@ from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObj
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 150
+HIDDEN = 140
 LATENT = 30
 EDGE_HIDDEN = 50
 DROP = 0.0
 LR = 1e-3
-EPOCHS = 500
-BATCH_SIZE_NODES = 8000
-NEIGHBORS = [50, 40, 30]
+EPOCHS = 1000
+BATCH_SIZE_NODES = 12000
+NEIGHBORS = [50, 50, 50]
 GRAD_CLIP = 1.0
-USE_AMP = True
-USE_COMPILE = False
+
 SCHEDULER_STEP = 200
-SELF_LOOP = True
+
 MODEL_PATH = "model/gnn_ae_diffpool.pth"
 LOSS_PATH = "model/loss_gnn_ae_diffpool.txt"
 
+# BOOL FLAGS
+USE_AMP = True
+USE_COMPILE = False
+RETURN_AUX = True  # return aux losses (link + entropy) from DiffPool
+SELF_LOOP = True
+
 # DiffPool hierarchy (number of clusters per pooling level)
-CLUSTERS_PER_LEVEL: List[int] = [800]
+CLUSTERS_PER_LEVEL: List[int] = [1000]
 
 
 # =========================
@@ -51,23 +56,56 @@ def build_sparse_adj(edge_index: torch.Tensor, num_nodes: int) -> SparseTensor:
     ).coalesce()
 
 
-def diffpool_aux_losses(A_sparse: SparseTensor, S: torch.Tensor):
+def diffpool_aux_losses(
+    A: SparseTensor,
+    S: torch.Tensor,
+    neg_ratio: float = 1.0,
+    drop_self_loops: bool = True,
+    eps: float = 1e-8,
+):
     """
-    Link prediction and entropy losses.
-    A_sparse: [N,N] SparseTensor (row-normalized not required here).
-    S:        [N,C] soft assignments (rows ~ stochastic)
+    Link+Entropy (e opzionale 'balance') senza densificare:
+      - Pos: MSE( <S_i, S_j>, A_ij ) sugli edge
+      - Neg: MSE( <S_i, S_j>, 0 ) su coppie (i,j) campionate
+      - Entropy: media delle entropie riga
+      - Balance (facoltativo): spinge l'uso uniforme dei cluster
     """
-    # A_hat ≈ S S^T  → encourage edges to be respected by assignments
-    A_dense = A_sparse.to_dense()
-    A_hat = S @ S.t()
-    link_loss = F.mse_loss(A_dense, A_hat)
+    # --- edge list ---
+    row, col, val = A.coo()
+    if drop_self_loops:
+        mask = row != col
+        row, col = row[mask], col[mask]
+        val = None if val is None else val[mask]
 
-    # Encourage confident-but-not-collapsed assignments
-    # entropy per row: -sum_j S_ij log S_ij
-    S_clamped = S.clamp_min(1e-8)
-    entropy = -(S_clamped * S_clamped.log()).sum(dim=1).mean()
+    if val is None:
+        val = S.new_ones(row.numel())
 
-    return link_loss, entropy
+    # --- positivi (edge reali) ---
+    s_i = S.index_select(0, row)
+    s_j = S.index_select(0, col)
+    pos_score = (s_i * s_j).sum(dim=1)
+    pos_loss = F.mse_loss(pos_score, val)
+
+    # --- negativi (non-edge) ---
+    num_pos = row.numel()
+    num_neg = max(1, int(neg_ratio * num_pos))
+    # campiona indici random; va benissimo per batches di NeighborLoader
+    i_neg = torch.randint(0, S.size(0), (num_neg,), device=S.device)
+    j_neg = torch.randint(0, S.size(0), (num_neg,), device=S.device)
+    neg_score = (S[i_neg] * S[j_neg]).sum(dim=1)
+    neg_loss = (neg_score**2).mean()  # target=0
+
+    link_loss = 0.5 * (pos_loss + neg_loss)
+
+    # --- entropy per nodo (favorisce assegnamenti confidenti) ---
+    Sc = S.clamp_min(eps)
+    entropy = -(Sc * Sc.log()).sum(dim=1).mean()
+
+    # --- balance (opzionale ma utile per evitare collasso su 1 cluster) ---
+    p = S.mean(dim=0)  # uso medio dei cluster
+    balance = ((p - 1.0 / S.size(1)) ** 2).mean()
+
+    return link_loss, entropy, balance
 
 
 def sparse_diff_pool(
@@ -213,9 +251,9 @@ class DiffPoolBlock(nn.Module):
     #         "A_prev": A_prev,  # <— NEW
     #     }
     #     return (x_pool, edge_index_pool, None, batch), state
-    def forward(self, x, edge_index, edge_attr, batch):
+    def forward(self, x, edge_index, edge_attr, batch, tau):
         x = self.gnn(x, edge_index, edge_attr, batch)
-        S = F.softmax(self.assign(x), dim=-1)  # [N, C]
+        S = F.softmax(self.assign(x) / tau, dim=-1)  # [N, C]
 
         A_prev = build_sparse_adj(edge_index, x.size(0))  # se usi aux losses
 
@@ -288,7 +326,7 @@ class GraphAutoEncoder(nn.Module):
         # Final prediction head
         self.head = nn.Linear(hidden, out_ch)
 
-    def forward(self, data, return_aux: bool = False):
+    def forward(self, data, tau: float = 1.0, return_aux: bool = False):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
         batch = getattr(data, "batch", None)
         if batch is None:
@@ -303,7 +341,7 @@ class GraphAutoEncoder(nn.Module):
         for enc in self.encoder:
             enc_batches.append(batch)
             (x, edge_index, edge_attr, batch), state = enc(
-                x, edge_index, edge_attr, batch
+                x, edge_index, edge_attr, batch, tau
             )
             states.append(state)
             prev_idx, prev_attr = edge_index, edge_attr
@@ -361,19 +399,26 @@ def train(
     from tqdm import trange
 
     model.to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        opt, step_size=scheduler_step, gamma=0.9
-    )
+    # opt = torch.optim.Adam(model.parameters(), lr=lr)
+    # scheduler = torch.optim.lr_scheduler.StepLR(
+    #     opt, step_size=scheduler_step, gamma=0.9
+    # )
     scaler = torch.amp.GradScaler(enabled=use_amp, device=device.type)
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=epochs, eta_min=3e-5
+    )
 
     model.train()
     losses = []
 
     loop = trange(EPOCHS, desc="Training", dynamic_ncols=True)
+
     for ep in loop:
         tot = 0.0
         n_batches = 0
+        TAU = max(0.25, 1.0 - 0.75 * (ep / (0.6 * epochs)))  # annealing
+        # TAU = 1.0  # no annealing
 
         for batch in loader:
             batch = batch.to(device)
@@ -386,28 +431,65 @@ def train(
             target_dim = batch.y.size(1)
 
             with torch.amp.autocast(enabled=use_amp, device_type=device.type):
-                out = model(batch)  # [N, out_ch]
+                if RETURN_AUX:
+                    out, aux = model(
+                        batch, return_aux=RETURN_AUX, tau=TAU
+                    )  # [N, out_ch]
+                else:
+                    out = model(batch, return_aux=False)  # [N, out_ch]
                 pred = out[:center, :target_dim]  # center-node supervision
                 tgt = batch.y[:center, :target_dim]
 
-                loss = F.mse_loss(pred, tgt)
+                # loss sui link e entropia
+                if RETURN_AUX:
+                    loss_link, loss_ent = 0.0, 0.0
+                    for S, A_prev in aux:
+                        lk, ent, bal = diffpool_aux_losses(A_prev, S)
+                        loss_link += lk
+                        loss_ent += ent
+                    loss = (
+                        F.mse_loss(pred, tgt)
+                        + 0.001 * loss_link
+                        + 0.001 * loss_ent
+                        + 0.001 * bal
+                    )
+                else:
+                    loss = F.mse_loss(pred, tgt)
 
             scaler.scale(loss).backward()
             if grad_clip is not None:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+            scale_before = scaler.get_scale() if use_amp else None
             scaler.step(opt)
             scaler.update()
+            if use_amp:
+                scale_after = scaler.get_scale()
+                # se c'è stato overflow, optimizer.step() è saltato => NON step del scheduler
+                if scale_after >= scale_before:
+                    scheduler.step()
+            else:
+                scheduler.step()
 
             tot += loss.item()
             n_batches += 1
-        loop.set_postfix(
-            {
-                "loss": f"{loss.item():.6f}",
-            }
-        )
+        if RETURN_AUX:
+            loop.set_postfix(
+                {
+                    "loss": f"{(tot / max(1, n_batches)):.6f}",
+                    "link": f"{(loss_link.item() / max(1, n_batches)):.6f}",
+                    "ent": f"{(loss_ent.item() / max(1, n_batches)):.6f}",
+                    "tau": f"{TAU:.4f}",
+                }
+            )
+        else:
+            loop.set_postfix(
+                {
+                    "loss": f"{loss.item():.6f}",
+                }
+            )
 
-        scheduler.step()
         avg = tot / max(1, n_batches)
         losses.append(avg)
 

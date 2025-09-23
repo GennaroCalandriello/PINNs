@@ -368,7 +368,7 @@ class GraphAutoencoderDiffPool(nn.Module):
             output_dim=out_dim,
             edge_dim=edge_dim + 1,  # <<< cambia qui
             num_layers=3,
-            p_drop=max(0.1, dropout),
+            p_drop=dropout,
         )
 
     def forward(self, data: Data):
