@@ -21,29 +21,29 @@ from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObj
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 140
+HIDDEN = 70
 LATENT = 30
 EDGE_HIDDEN = 50
 DROP = 0.0
 LR = 1e-3
-EPOCHS = 1000
+EPOCHS = 2000
 BATCH_SIZE_NODES = 12000
-NEIGHBORS = [50, 50, 50]
+NEIGHBORS = [80, 80, 80]
 GRAD_CLIP = 1.0
 
 SCHEDULER_STEP = 200
 
-MODEL_PATH = "model/gnn_ae_diffpool.pth"
-LOSS_PATH = "model/loss_gnn_ae_diffpool.txt"
+MODEL_PATH = "model/gnn_ae_diffpool1.pth"
+LOSS_PATH = "model/loss_gnn_ae_diffpool1.txt"
 
 # BOOL FLAGS
 USE_AMP = True
 USE_COMPILE = False
-RETURN_AUX = True  # return aux losses (link + entropy) from DiffPool
+RETURN_AUX = False  # return aux losses (link + entropy) from DiffPool
 SELF_LOOP = True
 
 # DiffPool hierarchy (number of clusters per pooling level)
-CLUSTERS_PER_LEVEL: List[int] = [1000]
+CLUSTERS_PER_LEVEL: List[int] = [1350]
 
 
 # =========================
@@ -315,7 +315,8 @@ class GraphAutoEncoder(nn.Module):
 
         # Bottleneck on the coarsest graph
         self.bottleneck = EdgeGNNLayer(hidden, latent, edge_dim)
-        self.latent_up = nn.Linear(latent, hidden)
+        # self.latent_up = nn.Linear(latent, hidden)
+        self.latent_up = nn.Sequential(nn.Linear(latent, hidden), nn.GELU())
 
         # Decoder: mirror the depth with EdgeGNN layers
         depth = len(clusters_per_level)
@@ -325,6 +326,7 @@ class GraphAutoEncoder(nn.Module):
 
         # Final prediction head
         self.head = nn.Linear(hidden, out_ch)
+        # self.norm = nn.LayerNorm(out_ch)
 
     def forward(self, data, tau: float = 1.0, return_aux: bool = False):
         x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
@@ -364,6 +366,7 @@ class GraphAutoEncoder(nn.Module):
             x = dec(x, edge_index_prev, edge_attr_prev, batch_prev)
 
         out = self.head(x)
+        # out = self.norm(out)  #!!!!!!! WARNING: LayerNorm on output
 
         if return_aux:
             aux = [(st["S"], st["A_prev"]) for st in states]
@@ -387,6 +390,119 @@ def GraphLoader(graph_data, batch_size_nodes=BATCH_SIZE_NODES, neighbors=NEIGHBO
 # =========================
 # Training
 # =========================
+# def train(
+#     model: nn.Module,
+#     loader: NeighborLoader,
+#     epochs: int = EPOCHS,
+#     lr: float = LR,
+#     use_amp: bool = USE_AMP,
+#     grad_clip: float = GRAD_CLIP,
+#     scheduler_step: int = SCHEDULER_STEP,
+# ):
+#     from tqdm import trange
+
+#     model.to(device)
+#     # opt = torch.optim.Adam(model.parameters(), lr=lr)
+#     # scheduler = torch.optim.lr_scheduler.StepLR(
+#     #     opt, step_size=scheduler_step, gamma=0.9
+#     # )
+#     scaler = torch.amp.GradScaler(enabled=use_amp, device=device.type)
+#     opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+#     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+#         opt, T_max=epochs, eta_min=3e-5
+#     )
+
+#     model.train()
+#     losses = []
+
+#     loop = trange(EPOCHS, desc="Training", dynamic_ncols=True)
+
+#     for ep in loop:
+#         tot = 0.0
+#         n_batches = 0
+#         TAU = max(0.60, 1.0 - 0.75 * (ep / (epochs)))  # annealing
+#         # TAU = 1.0  # no annealing
+
+#         for batch in loader:
+#             batch = batch.to(device)
+#             opt.zero_grad(set_to_none=True)
+
+#             # NeighborLoader marks the first "center" nodes
+#             center = getattr(batch, "batch_size", batch.x.size(0))
+
+#             # Infer output channels from target y
+#             target_dim = batch.y.size(1)
+
+#             with torch.amp.autocast(enabled=use_amp, device_type=device.type):
+#                 if RETURN_AUX:
+#                     out, aux = model(
+#                         batch, return_aux=RETURN_AUX, tau=TAU
+#                     )  # [N, out_ch]
+#                 else:
+#                     out = model(batch, return_aux=False)  # [N, out_ch]
+#                 pred = out[:center, :target_dim]  # center-node supervision
+#                 u_pred = pred[:, 0]
+#                 v_pred = pred[:, 1]
+#                 tgt = batch.y[:center, :target_dim]
+#                 u_tgt = tgt[:, 0]
+#                 v_tgt = tgt[:, 1]
+
+#                 # loss sui link e entropia
+#                 if RETURN_AUX:
+#                     loss_link, loss_ent = 0.0, 0.0
+#                     for S, A_prev in aux:
+#                         lk, ent, bal = diffpool_aux_losses(A_prev, S)
+#                         loss_link += lk
+#                         loss_ent += ent
+#                     loss = (
+#                         F.mse_loss(pred, tgt)
+#                         + 0.001 * loss_link
+#                         + 0.001 * loss_ent
+#                         + 0.001 * bal
+#                     )
+#                 else:
+#                     loss = F.mse_loss(u_pred, u_tgt) + F.mse_loss(v_pred, v_tgt)
+
+#             scaler.scale(loss).backward()
+#             if grad_clip is not None:
+#                 scaler.unscale_(opt)
+#                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+#             scale_before = scaler.get_scale() if use_amp else None
+#             scaler.step(opt)
+#             scaler.update()
+#             if use_amp:
+#                 scale_after = scaler.get_scale()
+#                 # se c'è stato overflow, optimizer.step() è saltato => NON step del scheduler
+#                 if scale_after >= scale_before:
+#                     scheduler.step()
+#             else:
+#                 scheduler.step()
+
+#             tot += loss.item()
+#             n_batches += 1
+#         if RETURN_AUX:
+#             loop.set_postfix(
+#                 {
+#                     "loss": f"{(tot / max(1, n_batches)):.6f}",
+#                     "link": f"{(loss_link.item() / max(1, n_batches)):.6f}",
+#                     "ent": f"{(loss_ent.item() / max(1, n_batches)):.6f}",
+#                     "tau": f"{TAU:.4f}",
+#                 }
+#             )
+#         else:
+#             loop.set_postfix(
+#                 {
+#                     "loss": f"{loss.item():.6f}",
+#                     "tau": f"{TAU:.4f}",
+#                 }
+#             )
+
+#         avg = tot / max(1, n_batches)
+#         losses.append(avg)
+
+
+#     return model, losses
 def train(
     model: nn.Module,
     loader: NeighborLoader,
@@ -394,104 +510,121 @@ def train(
     lr: float = LR,
     use_amp: bool = USE_AMP,
     grad_clip: float = GRAD_CLIP,
-    scheduler_step: int = SCHEDULER_STEP,
+    scheduler_step: int = SCHEDULER_STEP,  # (non usato qui, rimasto per compatibilità)
 ):
     from tqdm import trange
+    import math
 
     model.to(device)
-    # opt = torch.optim.Adam(model.parameters(), lr=lr)
-    # scheduler = torch.optim.lr_scheduler.StepLR(
-    #     opt, step_size=scheduler_step, gamma=0.9
-    # )
     scaler = torch.amp.GradScaler(enabled=use_amp, device=device.type)
-    opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+
+    # Usa davvero il parametro lr
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # >>> COSINE per step (batch-wise): T_max = total_steps
+    steps_per_epoch = max(1, len(loader))
+    total_steps = epochs * steps_per_epoch
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=epochs, eta_min=3e-5
+        opt, T_max=total_steps, eta_min=3e-5
     )
 
     model.train()
     losses = []
 
-    loop = trange(EPOCHS, desc="Training", dynamic_ncols=True)
+    loop = trange(epochs, desc="Training", dynamic_ncols=True)
 
+    global_step = 0
     for ep in loop:
-        tot = 0.0
+        tot_loss = 0.0
+        tot_link = 0.0
+        tot_ent = 0.0
+        tot_bal = 0.0
         n_batches = 0
-        TAU = max(0.25, 1.0 - 0.75 * (ep / (0.6 * epochs)))  # annealing
-        # TAU = 1.0  # no annealing
+
+        TAU = max(
+            0.60, 1.0 - 0.75 * (ep / epochs)
+        )  # annealing tau (se vuoi: fisso a 1.0)
 
         for batch in loader:
             batch = batch.to(device)
             opt.zero_grad(set_to_none=True)
 
-            # NeighborLoader marks the first "center" nodes
             center = getattr(batch, "batch_size", batch.x.size(0))
-
-            # Infer output channels from target y
             target_dim = batch.y.size(1)
 
             with torch.amp.autocast(enabled=use_amp, device_type=device.type):
                 if RETURN_AUX:
-                    out, aux = model(
-                        batch, return_aux=RETURN_AUX, tau=TAU
-                    )  # [N, out_ch]
+                    out, aux = model(batch, return_aux=True, tau=TAU)
                 else:
-                    out = model(batch, return_aux=False)  # [N, out_ch]
-                pred = out[:center, :target_dim]  # center-node supervision
+                    out = model(batch, return_aux=False, tau=TAU)
+                pred = out[:center, :target_dim]
                 tgt = batch.y[:center, :target_dim]
 
-                # loss sui link e entropia
+                # componi la loss
                 if RETURN_AUX:
-                    loss_link, loss_ent = 0.0, 0.0
+                    loss_link = 0.0
+                    loss_ent = 0.0
+                    loss_bal = 0.0
                     for S, A_prev in aux:
                         lk, ent, bal = diffpool_aux_losses(A_prev, S)
-                        loss_link += lk
-                        loss_ent += ent
+                        loss_link = loss_link + lk
+                        loss_ent = loss_ent + ent
+                        loss_bal = loss_bal + bal
+                    # pesi delicati sui termini ausiliari
+                    w_link, w_ent, w_bal = 1e-3, 1e-4, 1e-3
+                    loss_recon = F.mse_loss(pred, tgt)
                     loss = (
-                        F.mse_loss(pred, tgt)
-                        + 0.001 * loss_link
-                        + 0.001 * loss_ent
-                        + 0.001 * bal
+                        loss_recon
+                        + w_link * loss_link
+                        + w_ent * loss_ent
+                        + w_bal * loss_bal
                     )
                 else:
-                    loss = F.mse_loss(pred, tgt)
+                    # due canali (u,v)
+                    loss = F.mse_loss(pred[:, 0], tgt[:, 0]) + F.mse_loss(
+                        pred[:, 1], tgt[:, 1]
+                    )
 
+            # AMP: backward scalato, poi unscale per fare clip
             scaler.scale(loss).backward()
             if grad_clip is not None:
                 scaler.unscale_(opt)
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
-            scale_before = scaler.get_scale() if use_amp else None
+            # Step ottimizzatore e scaler
             scaler.step(opt)
             scaler.update()
-            if use_amp:
-                scale_after = scaler.get_scale()
-                # se c'è stato overflow, optimizer.step() è saltato => NON step del scheduler
-                if scale_after >= scale_before:
-                    scheduler.step()
-            else:
-                scheduler.step()
 
-            tot += loss.item()
+            # >>> Scheduler: SEMPRE una step per batch (senza gating su overflow)
+            scheduler.step()
+            global_step += 1
+
+            # Accumulo per log epoca
+            tot_loss += float(loss.detach())
+            if RETURN_AUX:
+                tot_link += float(loss_link.detach())
+                tot_ent += float(loss_ent.detach())
+                tot_bal += float(loss_bal.detach())
             n_batches += 1
-        if RETURN_AUX:
-            loop.set_postfix(
-                {
-                    "loss": f"{(tot / max(1, n_batches)):.6f}",
-                    "link": f"{(loss_link.item() / max(1, n_batches)):.6f}",
-                    "ent": f"{(loss_ent.item() / max(1, n_batches)):.6f}",
-                    "tau": f"{TAU:.4f}",
-                }
-            )
-        else:
-            loop.set_postfix(
-                {
-                    "loss": f"{loss.item():.6f}",
-                }
-            )
 
-        avg = tot / max(1, n_batches)
+        avg = tot_loss / max(1, n_batches)
         losses.append(avg)
+
+        # Log ordinato: loss media epoca + lr corrente + tau
+        log_dict = {
+            "loss": f"{avg:.6f}",
+            "lr": f"{scheduler.get_last_lr()[0]:.2e}",
+            "tau": f"{TAU:.3f}",
+        }
+        if RETURN_AUX and n_batches > 0:
+            log_dict.update(
+                {
+                    "link": f"{(tot_link/n_batches):.5f}",
+                    "ent": f"{(tot_ent /n_batches):.5f}",
+                    "bal": f"{(tot_bal /n_batches):.5f}",
+                }
+            )
+        loop.set_postfix(log_dict)
 
     return model, losses
 

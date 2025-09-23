@@ -198,9 +198,9 @@ def createGraphData():
     invr = 1.0 / (dist + 1e-12)
     edge_attr = torch.cat([rel, dist, dirn, invr], dim=1)  # [E,5]
 
-    ea_norm = GaussianNormalizer(edge_attr)
-    ea_norm.cuda()
-    edge_attr = ea_norm.encode(edge_attr)
+    # ea_norm = GaussianNormalizer(edge_attr)
+    # ea_norm.cuda()
+    # edge_attr = ea_norm.encode(edge_attr)
 
     return Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
