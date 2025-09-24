@@ -13,7 +13,13 @@ from torch_sparse import SparseTensor
 from torch_geometric.nn import GraphNorm
 
 # If you have these utilities, import them; otherwise replace createGraphData()
-from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObject
+from ns_GNN_cav2 import (
+    createGraphData,
+    dataLoader,
+    dataNormalizer,
+    geometryObject,
+    GaussianNormalizer,
+)
 
 # =========================
 # Settings / Hyperparameters
@@ -21,20 +27,20 @@ from ns_GNN_cav2 import createGraphData, dataLoader, dataNormalizer, geometryObj
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 100  # best con 72 ma errore alto
-LATENT = 60  # best con 42 ma errore alto
-EDGE_HIDDEN = 100  # best con 52 ma errore alto
+HIDDEN = 96  # best con 72 ma errore alto
+LATENT = 40  # best con 42 ma errore alto
+EDGE_HIDDEN = 96  # best con 52 ma errore alto
 DROP = 0.0
 LR = 1e-3
-EPOCHS = 1400
-BATCH_SIZE_NODES = 4000  # best con 16000 ma errore alto
+EPOCHS = 2000
+BATCH_SIZE_NODES = 5000  # best con 16000 ma errore alto
 
 if BATCH_SIZE_NODES is not None:
     ENFORCE_BLOCKWISE = True  # avoid graph mixing in the multigraph case
 else:
     ENFORCE_BLOCKWISE = False
 
-NEIGHBORS = [80, 80, 80]
+NEIGHBORS = [100, 100, 100]  # per NeighborLoader
 GRAD_CLIP = None
 
 SCHEDULER_STEP = 200
@@ -43,6 +49,7 @@ MODEL_PATH = "model/gnn_ae_diffpool1.pth"
 LOSS_PATH = "model/loss_gnn_ae_diffpool1.txt"
 MLP_VARIANT = 1  # 1 per simil MeshGraphNet, 0 per MeshCutriStyle
 AGGREGATION = "add"  # "add" | "mean" | "max" ---- prima era "mean" ora "add"
+nonlinearFn = nn.ReLU()
 
 # BOOL FLAGS
 USE_AMP = True
@@ -51,7 +58,7 @@ RETURN_AUX = False  # return aux losses (link + entropy) from DiffPool
 SELF_LOOP = True  # prima era True
 
 # DiffPool hierarchy (number of clusters per pooling level)
-CLUSTERS_PER_LEVEL: List[int] = [800]  # best con [800] ma errore alto
+CLUSTERS_PER_LEVEL: List[int] = [1400]  # best con [800] ma errore alto
 
 
 # =========================
@@ -116,32 +123,87 @@ def diffpool_aux_losses(
     return link_loss, entropy, balance
 
 
+# def sparse_diff_pool(
+#     x: torch.Tensor, edge_index: torch.Tensor, S: torch.Tensor
+# ) -> tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     Sparse DiffPool (eqs. (3)-(4) in DiffPool-style formulations).
+
+#     Args:
+#         x: [N, F] node embeddings
+#         edge_index: [2, E] edges (COO)
+#         S: [N, C] soft assignment (rows sum ~ 1)
+
+#     Returns:
+#         x_pool: [C, F]
+#         edge_index_pool: [2, E'] pooled graph edges (thresholded from A_pool)
+#     """
+#     N, C = S.size(0), S.size(1)
+#     A = build_sparse_adj(edge_index, N)  # [N, N]
+#     AS = A.matmul(S)  # [N, C]
+#     A_pool = S.transpose(0, 1) @ AS  # [C, C]
+#     x_pool = S.transpose(0, 1) @ x  # [C, F]
+
+#     # Sparsify A_pool to get a new edge_index
+#     threshold = (A_pool.abs().mean() * 0.1).item()
+#     A_pool = A_pool * (A_pool > threshold)
+#     row_idx, col_idx = A_pool.nonzero(as_tuple=True)
+#     edge_index_pool = torch.stack([row_idx, col_idx], dim=0)
+#     return x_pool, edge_index_pool
+
+
 def sparse_diff_pool(
-    x: torch.Tensor, edge_index: torch.Tensor, S: torch.Tensor
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    S: torch.Tensor,
+    topk_per_row: int = 8,
+    keep_self_loops: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Sparse DiffPool (eqs. (3)-(4) in DiffPool-style formulations).
-
-    Args:
-        x: [N, F] node embeddings
-        edge_index: [2, E] edges (COO)
-        S: [N, C] soft assignment (rows sum ~ 1)
-
-    Returns:
-        x_pool: [C, F]
-        edge_index_pool: [2, E'] pooled graph edges (thresholded from A_pool)
+    DiffPool su grafi sparsi: A_pool = S^T A S, poi sparsifica con top-k per riga.
+    - Simmetrizza A_pool.
+    - Opzionalmente rimuove self-loops.
     """
-    N, C = S.size(0), S.size(1)
-    A = build_sparse_adj(edge_index, N)  # [N, N]
-    AS = A.matmul(S)  # [N, C]
-    A_pool = S.transpose(0, 1) @ AS  # [C, C]
-    x_pool = S.transpose(0, 1) @ x  # [C, F]
+    N, C = S.size()
+    A = build_sparse_adj(edge_index, N)  # [N,N] SparseTensor
+    AS = A.matmul(S)  # [N,C] denso
+    A_pool = S.transpose(0, 1) @ AS  # [C,C] denso
 
-    # Sparsify A_pool to get a new edge_index
-    threshold = (A_pool.abs().mean() * 0.1).item()
-    A_pool = A_pool * (A_pool > threshold)
-    row_idx, col_idx = A_pool.nonzero(as_tuple=True)
-    edge_index_pool = torch.stack([row_idx, col_idx], dim=0)
+    # simmetrizza per sicurezza
+    A_pool = 0.5 * (A_pool + A_pool.transpose(0, 1))
+
+    if not keep_self_loops:
+        A_pool.fill_diagonal_(0.0)
+
+    # top-k per riga
+    if topk_per_row is not None and topk_per_row > 0 and topk_per_row < C:
+        vals, idxs = torch.topk(A_pool, k=topk_per_row, dim=1)
+        # costruiamo edge_index da righe e idxs
+        row_idx = (
+            torch.arange(C, device=A_pool.device)
+            .unsqueeze(1)
+            .expand_as(idxs)
+            .reshape(-1)
+        )
+        col_idx = idxs.reshape(-1)
+        mask = vals.reshape(-1) > 0
+        row_idx = row_idx[mask]
+        col_idx = col_idx[mask]
+        # (opzionale) aggiungi simmetrici per sicurezza
+        row_idx2 = col_idx
+        col_idx2 = row_idx
+        row_idx = torch.cat([row_idx, row_idx2], dim=0)
+        col_idx = torch.cat([col_idx, col_idx2], dim=0)
+        # rimuovi duplicati
+        edge_index_pool = torch.stack([row_idx, col_idx], dim=0)
+        edge_index_pool = torch.unique(edge_index_pool, dim=1)
+    else:
+        # fallback: threshold delicato
+        thr = float(A_pool.abs().mean() * 0.1)
+        row_idx, col_idx = (A_pool > thr).nonzero(as_tuple=True)
+        edge_index_pool = torch.stack([row_idx, col_idx], dim=0)
+
+    x_pool = S.transpose(0, 1) @ x  # [C,F]
     return x_pool, edge_index_pool
 
 
@@ -169,35 +231,35 @@ class EdgeGNNLayer(MessagePassing):
             self.mlp_msg = nn.Sequential(
                 nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
                 nn.LayerNorm(hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Dropout(dropout),
                 nn.Linear(hidden, out_ch),
             )
             self.mlp_upd = nn.Sequential(
                 nn.Linear(in_ch + out_ch, hidden),
                 nn.LayerNorm(hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Dropout(dropout),
                 nn.Linear(hidden, out_ch),
             )
         elif MLP_VARIANT == 1:
             self.mlp_msg = nn.Sequential(
                 nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, out_ch),
                 nn.LayerNorm(out_ch),
             )
             self.mlp_upd = nn.Sequential(
                 nn.Linear(in_ch + out_ch, hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, hidden),
-                nn.GELU(),
+                nonlinearFn,
                 nn.Linear(hidden, out_ch),
                 nn.LayerNorm(out_ch),
             )
@@ -233,8 +295,9 @@ class EdgeGNNLayer(MessagePassing):
         # h = self.norm(h)
         if self.use_res:
             h = h + x
+
+        # h = self.graphnorm(h, batch)
         h = F.gelu(h)
-        h = self.graphnorm(h, batch)
 
         return h
 
@@ -262,70 +325,30 @@ class DiffPoolBlock(nn.Module):
         self.gnn = EdgeGNNLayer(ch, ch, edge_dim)
         self.assign = nn.Sequential(
             nn.Linear(ch, ch),
-            nn.GELU(),
+            nonlinearFn,
             # nn.LayerNorm(ch),
             nn.Linear(ch, num_clusters),
-            nn.GELU(),
+            nonlinearFn,
             nn.LayerNorm(num_clusters),
         )
 
-    #  def forward(self, x, edge_index, edge_attr, batch, tau):
-    #     x = self.gnn(x, edge_index, edge_attr, batch)
-    #     S = F.softmax(self.assign(x) / tau, dim=-1)  # [N, C]
-
-    #     A_prev = build_sparse_adj(edge_index, x.size(0))  # se usi aux losses
-
-    #     x_pool, edge_index_pool = sparse_diff_pool(x, edge_index, S)
-    #     C = S.size(1)
-
-    #     # *** QUI: batch per il grafo coarsened (C nodi) ***
-    #     if batch is None or batch.numel() == 0 or batch.unique().numel() == 1:
-    #         batch_coarse = x_pool.new_zeros(C, dtype=torch.long)  # tutto un grafo
-    #     else:
-    #         # caso multi-grafo (se/quando servirà): "mode" del batch per cluster
-    #         # hard cluster
-    #         cluster = S.argmax(dim=1)  # [N]
-    #         # costruiamo per-cluster un assegnamento di batch tramite maggioranza
-    #         # (semplice fallback: prendiamo il batch del primo nodo assegnato)
-    #         batch_coarse = x_pool.new_zeros(C, dtype=torch.long)
-    #         batch_coarse.index_copy_(
-    #             0, cluster, batch
-    #         )  # semplice ma funziona se non mischia grafi
-
-    #     state = {
-    #         "S": S,
-    #         "prev_edge_index": edge_index,
-    #         "prev_edge_attr": edge_attr,
-    #         "A_prev": A_prev,
-    #     }
-    #     # *** ritorna batch_coarse ***
-    #     return (x_pool, edge_index_pool, None, batch_coarse), state
-
     def forward(self, x, edge_index, edge_attr, batch, tau):
-
-        # 1. Message passing
+        # 1) message passing
         x = self.gnn(x, edge_index, edge_attr, batch)
 
-        # 2. Soft assignment with temperature
+        # 2) soft assignment (con tau)
         S = F.softmax(self.assign(x) / tau, dim=-1)  # [N, C]
 
-        A_prev = build_sparse_adj(edge_index, x.size(0))  # se usi aux losses
-
-        x_pool, edge_index_pool = sparse_diff_pool(x, edge_index, S)
-        C = S.size(1)
-
-        # 3.  # 3. Optional: block-diagonalize S so graphs do not mix clusters
-        #    Requires that num_clusters is divisible by num_graphs in this mini-batch.
+        # 2b) opzionale: blockwise prima del pooling (coerenza encode/decode)
         if self.enforce_blockwise:
             unique_batches = batch.unique()
-            G = unique_batches.numel()  # number of graphs in the batch
+            G = unique_batches.numel()
             if G > 1:
                 if self.num_clusters % G != 0:
                     raise ValueError(
                         f"Cannot enforce block-wise DiffPool with {self.num_clusters} clusters and {G} graphs in the batch."
                     )
                 c_per_graph = self.num_clusters // G
-                # Build mask
                 mask = S.new_zeros(S.shape)
                 for g_idx, g in enumerate(unique_batches):
                     start = g_idx * c_per_graph
@@ -333,36 +356,30 @@ class DiffPoolBlock(nn.Module):
                     node_mask = batch == g
                     mask[node_mask, start:end] = 1.0
                 S = S * mask
-                # re-normalize each row (avoid rows becoming all-zero)
-                row_sum = S.sum(dim=1, keepdim=True).clamp_min(1e-12)
-                S = S / row_sum
+                S = S / S.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
-        # *** QUI: batch per il grafo coarsened (C nodi) ***
+        # 3) salvi A_prev per le aux losses
+        A_prev = build_sparse_adj(edge_index, x.size(0))
+
+        # 4) pooling con la S definitiva (quella che salvi e userai in unpool)
+        x_pool, edge_index_pool = sparse_diff_pool(x, edge_index, S)
+        C = S.size(1)
+
+        # 5) batch del grafo coarsened
         if batch.unique().numel() == 1:
-            batch_coarse = x_pool.new_zeros(C, dtype=torch.long)  # tutto un grafo
+            batch_coarse = x_pool.new_zeros(C, dtype=torch.long)
         else:
-            batch_float = batch.float()
             weight = S.transpose(0, 1)  # [C, N]
-            denom = weight.sum(dim=1, keepdim=True) + 1e-12
-            avg_batch = (weight @ batch_float.unsqueeze(1)) / denom  # [C,1]
+            denom = weight.sum(dim=1, keepdim=True).clamp_min(1e-12)
+            avg_batch = (weight @ batch.float().unsqueeze(1)) / denom  # [C,1]
             batch_coarse = avg_batch.round().squeeze(1).long()
-            # caso multi-grafo: "mode" del batch per cluster
-            # hard cluster
-            # cluster = S.argmax(dim=1)  # [N]
-            # # costruiamo per-cluster un assegnamento di batch tramite maggioranza
-            # # (semplice fallback: prendiamo il batch del primo nodo assegnato)
-            # batch_coarse = x_pool.new_zeros(C, dtype=torch.long)
-            # batch_coarse.index_copy_(
-            #     0, cluster, batch
-            # )  # semplice ma funziona se non mischia grafi
 
         state = {
-            "S": S,
+            "S": S,  # la S usata per pooling e che userai per unpool
             "prev_edge_index": edge_index,
             "prev_edge_attr": edge_attr,
             "A_prev": A_prev,
         }
-        # *** ritorna batch_coarse ***
         return (x_pool, edge_index_pool, None, batch_coarse), state
 
 
@@ -386,10 +403,13 @@ class GraphAutoEncoder(nn.Module):
 
         self.in_proj = nn.Sequential(
             nn.Linear(in_ch, hidden),
+            nonlinearFn,
+            nn.Linear(hidden, hidden),
+            nonlinearFn,
+            nn.Linear(hidden, hidden),
             nn.LayerNorm(hidden),
-            nn.GELU(),
         )
-
+        self.graphnorm = GraphNorm(hidden)
         # Encoder hierarchy (DiffPool-only)
         self.encoder = nn.ModuleList(
             [DiffPoolBlock(hidden, edge_dim, C) for C in clusters_per_level]
@@ -398,7 +418,13 @@ class GraphAutoEncoder(nn.Module):
         # Bottleneck on the coarsest graph
         self.bottleneck = EdgeGNNLayer(hidden, latent, edge_dim)
         # self.latent_up = nn.Linear(latent, hidden)
-        self.latent_up = nn.Sequential(nn.Linear(latent, hidden), nn.GELU())
+        self.latent_up = nn.Sequential(
+            nn.Linear(latent, hidden),
+            nonlinearFn,
+            nn.Linear(hidden, hidden),
+            nonlinearFn,
+            nn.Linear(hidden, hidden),
+        )
 
         # Decoder: mirror the depth with EdgeGNN layers
         depth = len(clusters_per_level)
@@ -410,9 +436,9 @@ class GraphAutoEncoder(nn.Module):
         # self.head = nn.Linear(hidden, out_ch)
         self.head = nn.Sequential(
             nn.Linear(hidden, hidden),
-            nn.GELU(),
+            nonlinearFn,
             nn.Linear(hidden, hidden),
-            nn.GELU(),
+            nonlinearFn,
             nn.Linear(hidden, out_ch),
         )
         # self.norm = nn.LayerNorm(out_ch)
@@ -453,8 +479,9 @@ class GraphAutoEncoder(nn.Module):
             # unpool
             x = S @ x  # [N_prev, hidden]
             x = dec(x, edge_index_prev, edge_attr_prev, batch_prev)
+            x = self.graphnorm(x, batch_prev)
 
-        out = self.head(x)
+        out = self.head(x)  # [N, out_ch]
         # out = self.norm(out)  #!!!!!!! WARNING: LayerNorm on output
 
         if return_aux:
@@ -473,125 +500,11 @@ def GraphLoader(graph_data, batch_size_nodes=BATCH_SIZE_NODES, neighbors=NEIGHBO
         batch_size=batch_size_nodes,
         input_nodes=None,  # all nodes
         shuffle=True,
+        subgraph_type="bidirectional",
     )
 
 
 # =========================
-# Training
-# =========================
-# def train(
-#     model: nn.Module,
-#     loader: NeighborLoader,
-#     epochs: int = EPOCHS,
-#     lr: float = LR,
-#     use_amp: bool = USE_AMP,
-#     grad_clip: float = GRAD_CLIP,
-#     scheduler_step: int = SCHEDULER_STEP,
-# ):
-#     from tqdm import trange
-
-#     model.to(device)
-#     # opt = torch.optim.Adam(model.parameters(), lr=lr)
-#     # scheduler = torch.optim.lr_scheduler.StepLR(
-#     #     opt, step_size=scheduler_step, gamma=0.9
-#     # )
-#     scaler = torch.amp.GradScaler(enabled=use_amp, device=device.type)
-#     opt = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-#     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-#         opt, T_max=epochs, eta_min=3e-5
-#     )
-
-#     model.train()
-#     losses = []
-
-#     loop = trange(EPOCHS, desc="Training", dynamic_ncols=True)
-
-#     for ep in loop:
-#         tot = 0.0
-#         n_batches = 0
-#         TAU = max(0.60, 1.0 - 0.75 * (ep / (epochs)))  # annealing
-#         # TAU = 1.0  # no annealing
-
-#         for batch in loader:
-#             batch = batch.to(device)
-#             opt.zero_grad(set_to_none=True)
-
-#             # NeighborLoader marks the first "center" nodes
-#             center = getattr(batch, "batch_size", batch.x.size(0))
-
-#             # Infer output channels from target y
-#             target_dim = batch.y.size(1)
-
-#             with torch.amp.autocast(enabled=use_amp, device_type=device.type):
-#                 if RETURN_AUX:
-#                     out, aux = model(
-#                         batch, return_aux=RETURN_AUX, tau=TAU
-#                     )  # [N, out_ch]
-#                 else:
-#                     out = model(batch, return_aux=False)  # [N, out_ch]
-#                 pred = out[:center, :target_dim]  # center-node supervision
-#                 u_pred = pred[:, 0]
-#                 v_pred = pred[:, 1]
-#                 tgt = batch.y[:center, :target_dim]
-#                 u_tgt = tgt[:, 0]
-#                 v_tgt = tgt[:, 1]
-
-#                 # loss sui link e entropia
-#                 if RETURN_AUX:
-#                     loss_link, loss_ent = 0.0, 0.0
-#                     for S, A_prev in aux:
-#                         lk, ent, bal = diffpool_aux_losses(A_prev, S)
-#                         loss_link += lk
-#                         loss_ent += ent
-#                     loss = (
-#                         F.mse_loss(pred, tgt)
-#                         + 0.001 * loss_link
-#                         + 0.001 * loss_ent
-#                         + 0.001 * bal
-#                     )
-#                 else:
-#                     loss = F.mse_loss(u_pred, u_tgt) + F.mse_loss(v_pred, v_tgt)
-
-#             scaler.scale(loss).backward()
-#             if grad_clip is not None:
-#                 scaler.unscale_(opt)
-#                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
-#             scale_before = scaler.get_scale() if use_amp else None
-#             scaler.step(opt)
-#             scaler.update()
-#             if use_amp:
-#                 scale_after = scaler.get_scale()
-#                 # se c'è stato overflow, optimizer.step() è saltato => NON step del scheduler
-#                 if scale_after >= scale_before:
-#                     scheduler.step()
-#             else:
-#                 scheduler.step()
-
-#             tot += loss.item()
-#             n_batches += 1
-#         if RETURN_AUX:
-#             loop.set_postfix(
-#                 {
-#                     "loss": f"{(tot / max(1, n_batches)):.6f}",
-#                     "link": f"{(loss_link.item() / max(1, n_batches)):.6f}",
-#                     "ent": f"{(loss_ent.item() / max(1, n_batches)):.6f}",
-#                     "tau": f"{TAU:.4f}",
-#                 }
-#             )
-#         else:
-#             loop.set_postfix(
-#                 {
-#                     "loss": f"{loss.item():.6f}",
-#                     "tau": f"{TAU:.4f}",
-#                 }
-#             )
-
-#         avg = tot / max(1, n_batches)
-#         losses.append(avg)
-
-
-#     return model, losses
 def train(
     model: nn.Module,
     loader: NeighborLoader,
@@ -630,10 +543,10 @@ def train(
         tot_bal = 0.0
         n_batches = 0
 
-        TAU = max(
-            0.50, 1.0 - 0.75 * (ep / epochs)
-        )  # annealing tau (se vuoi: fisso a 1.0)
-
+        # TAU = max(
+        #     0.50, 1.0 - 0.75 * (ep / epochs)
+        # )  # annealing tau (se vuoi: fisso a 1.0)
+        TAU = 1.0
         for batch in loader:
             batch = batch.to(device)
             opt.zero_grad(set_to_none=True)
@@ -718,6 +631,131 @@ def train(
     return model, losses
 
 
+def trainSimple(
+    model: nn.Module,
+    loader: NeighborLoader,
+    epochs: int = EPOCHS,
+    lr: float = LR,
+    use_amp: bool = USE_AMP,
+    grad_clip: float = GRAD_CLIP,
+    scheduler_step: int = SCHEDULER_STEP,  # (non usato qui, rimasto per compatibilità)
+    num_workers: int = 5,
+):
+    from tqdm import trange
+    import math
+
+    model.to(device)
+    scaler = torch.amp.GradScaler(enabled=use_amp, device=device.type)
+
+    # Usa davvero il parametro lr
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # >>> COSINE per step (batch-wise): T_max = total_steps
+    steps_per_epoch = max(1, len(loader))
+    print("Len loader:", len(loader))
+    total_steps = epochs * steps_per_epoch
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=total_steps, eta_min=8e-6
+    )
+    # scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=200, gamma=0.999)
+
+    model.train()
+    losses = []
+
+    loop = trange(epochs, desc="Training", dynamic_ncols=True)
+
+    global_step = 0
+    for ep in loop:
+        tot_loss = 0.0
+        tot_link = 0.0
+        tot_ent = 0.0
+        tot_bal = 0.0
+        n_batches = 0
+
+        # TAU = max(
+        #     0.50, 1.0 - 0.75 * (ep / epochs)
+        # )  # annealing tau (se vuoi: fisso a 1.0)
+        TAU = 1.0
+        # temp = 0
+        for batch in loader:
+            # print(f"Batch {temp}")
+            # temp += 1
+            batch = batch.to(device)
+            opt.zero_grad()
+
+            center = getattr(batch, "batch_size", batch.x.size(0))
+            target_dim = batch.y.size(1)
+
+            with torch.amp.autocast(enabled=use_amp, device_type=device.type):
+                if RETURN_AUX:
+                    out, aux = model(batch, return_aux=True, tau=TAU)
+                else:
+                    out = model(batch, return_aux=False, tau=TAU)
+                pred = out[:center, :target_dim]
+                tgt = batch.y[:center, :target_dim]
+
+                # componi la loss
+                if RETURN_AUX:
+                    loss_link = 0.0
+                    loss_ent = 0.0
+                    loss_bal = 0.0
+                    for S, A_prev in aux:
+                        lk, ent, bal = diffpool_aux_losses(A_prev, S)
+                        loss_link = loss_link + lk
+                        loss_ent = loss_ent + ent
+                        loss_bal = loss_bal + bal
+                    # pesi delicati sui termini ausiliari
+                    w_link, w_ent, w_bal = 1e-3, 1e-4, 1e-3
+                    loss_recon = F.mse_loss(pred, tgt)
+                    loss = (
+                        loss_recon
+                        + w_link * loss_link
+                        + w_ent * loss_ent
+                        + w_bal * loss_bal
+                    )
+                else:
+                    # due canali (u,v)
+                    loss = F.mse_loss(pred[:, 0], tgt[:, 0]) + F.mse_loss(
+                        pred[:, 1], tgt[:, 1]
+                    )
+            loss.backward()
+
+            # >>> Scheduler: SEMPRE una step per batch (senza gating su overflow)
+            global_step += 1
+
+            # Accumulo per log epoca
+            tot_loss += float(loss.detach())
+            if RETURN_AUX:
+                tot_link += float(loss_link.detach())
+                tot_ent += float(loss_ent.detach())
+                tot_bal += float(loss_bal.detach())
+            n_batches += 1
+
+        avg = tot_loss / max(1, n_batches)
+        losses.append(avg)
+
+        opt.step()
+        scheduler.step()
+
+        # Log ordinato: loss media epoca + lr corrente + tau
+        log_dict = {
+            "loss": f"{avg:.8f}",
+            "lr": f"{scheduler.get_last_lr()[0]:.5e}",
+            "tau": f"{TAU:.3f}",
+        }
+        if RETURN_AUX and n_batches > 0:
+            log_dict.update(
+                {
+                    "link": f"{(tot_link/n_batches):.5f}",
+                    "ent": f"{(tot_ent /n_batches):.5f}",
+                    "bal": f"{(tot_bal /n_batches):.5f}",
+                }
+            )
+        loop.set_postfix(log_dict)
+
+    return model, losses
+
+
 # =========================
 # Main
 # =========================
@@ -741,7 +779,7 @@ def main():
         model = torch.compile(model)  # optional, PyTorch 2.x
 
     loader = GraphLoader(data, batch_size_nodes=BATCH_SIZE_NODES, neighbors=NEIGHBORS)
-    model, loss_hist = train(model, loader)
+    model, loss_hist = trainSimple(model, loader)
 
     os.makedirs("model", exist_ok=True)
     torch.save(model.state_dict(), MODEL_PATH)

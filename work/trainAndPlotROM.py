@@ -1,4 +1,4 @@
-from testROM import *
+from testROMmod import *
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,7 +13,7 @@ from torch_geometric.data import Data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 geometry = "rectangle"  # "circle" or "rectangle"
-out_gif = "anim_testROM.gif"
+out_gif = "plots/anim_testROM.gif"
 
 # Rettangolo axis-aligned (angolo in basso-sx)
 RECT_X0 = 1000.0
@@ -81,6 +81,9 @@ def build_static_graph_and_norms(
     dirn = rel / (dist + 1e-12)
     invr = 1.0 / (dist + 1e-12)
     edge_attr = torch.cat([rel, dist, dirn, invr], dim=1).to(torch.float32)
+    ea_norm = GaussianNormalizer(edge_attr)
+    ea_norm.cuda()
+    edge_attr = ea_norm.encode(edge_attr)
 
     # Feature rettangolo (STATICHE, rettangolo fisso)
     sigma_x = xynorm.std[0].item()
@@ -172,7 +175,6 @@ def build_frame_data(static, U_frame):
 
     # Target = U_norm (ricostruzione)
     y = U_norm
-
     data_t = Data(
         x=x, y=y, pos=centers_norm, edge_index=edge_index, edge_attr=edge_attr
     ).to(device)

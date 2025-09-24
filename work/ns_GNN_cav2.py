@@ -193,14 +193,25 @@ def createGraphData():
 
     # --- Edge attributes ---
     rel = pos[edge_index[1]] - pos[edge_index[0]]
+
     dist = torch.norm(rel, dim=1, keepdim=True)
+
     dirn = rel / (dist + 1e-12)
+
     invr = 1.0 / (dist + 1e-12)
+
     edge_attr = torch.cat([rel, dist, dirn, invr], dim=1)  # [E,5]
 
-    # ea_norm = GaussianNormalizer(edge_attr)
-    # ea_norm.cuda()
-    # edge_attr = ea_norm.encode(edge_attr)
+    print("Some edge attributes samples before norm:", edge_attr[:2])
+    # print("Some edge direction samples:", dirn[:5])
+    # print("Some edge inverse distances samples before norm:", invr[:5])
+    # print("Some edge distances samples before norm:", dist[:5])
+    # print("Some edge relative positions samples:", rel[:5])
+
+    ea_norm = GaussianNormalizer(edge_attr)
+    ea_norm.cuda()
+    edge_attr = ea_norm.encode(edge_attr)
+    print("Some edge attributes samples after norm:", edge_attr[:2])
 
     return Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
