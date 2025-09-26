@@ -26,9 +26,9 @@ from ns_GNN_cav2 import (
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[DiffPool AE] Using device: {device}")
 
-HIDDEN = 128
-LATENT = 60
-EDGE_HIDDEN = 128
+HIDDEN = 100  # non dipende da hidden né latent, né da edge_hidden
+LATENT = 30
+EDGE_HIDDEN = 50  # misura
 DROP = 0.0
 LR = 2e-3
 EPOCHS = 400
@@ -36,8 +36,8 @@ GRAD_CLIP = None
 
 MODEL_PATH = "model/gnn_ae_diffpool1.pth"
 LOSS_PATH = "model/loss_gnn_ae_diffpool1.txt"
-MLP_VARIANT = 1  # 1 ~ MeshGraphNet-like MLP stack, 0 ~ lighter
-AGGREGATION = "add"  # "add" | "mean" | "max"
+MLP_VARIANT = 0  # 1 ~ MeshGraphNet-like MLP stack, 0 ~ lighter
+AGGREGATION = "add"  # "add" | "mean" | "max" aggregation deve essere "add" per DiffPool
 nonlinearFn = nn.GELU()
 
 # BOOL FLAGS
@@ -47,7 +47,7 @@ RETURN_AUX = False  # return aux losses (link + entropy) from DiffPool
 SELF_LOOP = True
 
 # DiffPool hierarchy (number of clusters per pooling level)
-CLUSTERS_PER_LEVEL: List[int] = [500]
+CLUSTERS_PER_LEVEL: List[int] = [800]  # Non c'entra con la qualità dell'output
 
 
 # =========================
@@ -109,7 +109,7 @@ def diffpool_aux_losses(
     return link_loss, entropy, balance
 
 
-def sparse_diff_pool(
+def sparse_diff_pool2(
     x: torch.Tensor,
     edge_index: torch.Tensor,
     S: torch.Tensor,
@@ -157,6 +157,155 @@ def sparse_diff_pool(
     return x_pool, edge_index_pool
 
 
+def sparse_diff_pool(
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    S: torch.Tensor,
+    topk_per_row: int = 8,
+    keep_self_loops: bool = False,
+    sparsify_mode: str = "mst_topk",  # 'topk' | 'quantile' | 'energy' | 'mst_topk' | 'knn'
+    quantile: float = 0.90,
+    energy_frac: float = 0.85,
+    knn_k: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    DiffPool su grafi sparsi: A_pool = S^T A S, poi sparsificazione.
+    Assunzione: singolo grafo.
+
+    sparsify_mode:
+      - topk: (default) k massimi per riga
+      - quantile: tieni pesi >= quantile globale
+      - energy: ordina tutti i pesi e tieni quelli che coprono una frazione dell'energia (somma)
+      - mst_topk: spanning tree (con pesi) + (k-1) extra per riga
+      - knn: kNN sui centroidi (S^T X) in spazio feature (ignora A_pool, ricostruisce)
+    """
+    N, C = S.size()
+    A = build_sparse_adj(edge_index, N)
+    AS = A.matmul(S)  # [N,C]
+    A_pool = S.transpose(0, 1) @ AS  # [C,C] denso
+
+    A_pool = 0.5 * (A_pool + A_pool.transpose(0, 1))
+    if not keep_self_loops:
+        A_pool.fill_diagonal_(0.0)
+
+    # Pooled features
+    x_pool = S.transpose(0, 1) @ x  # [C,F]
+
+    def make_edge_index(mask_mat: torch.Tensor) -> torch.Tensor:
+        row_idx, col_idx = mask_mat.nonzero(as_tuple=True)
+        if row_idx.numel() == 0:
+            # fallback: connect linear chain
+            row_idx = torch.arange(C - 1, device=A_pool.device)
+            col_idx = row_idx + 1
+        edge_index_pool = torch.stack([row_idx, col_idx], dim=0)
+        # forza simmetria
+        rev = edge_index_pool.flip(0)
+        edge_index_pool = torch.cat([edge_index_pool, rev], dim=1)
+        edge_index_pool = torch.unique(edge_index_pool, dim=1)
+        return edge_index_pool
+
+    if C <= 2:
+        # trivial
+        edge_index_pool = (
+            torch.tensor([[0, 1], [1, 0]], device=x.device)
+            if C == 2
+            else torch.zeros((2, 0), dtype=torch.long, device=x.device)
+        )
+        return x_pool, edge_index_pool
+
+    mode = sparsify_mode.lower()
+
+    if mode == "topk":
+        if topk_per_row is not None and 0 < topk_per_row < C:
+            vals, idxs = torch.topk(A_pool, k=topk_per_row, dim=1)
+            mask = torch.zeros_like(A_pool, dtype=torch.bool)
+            mask.scatter_(1, idxs, vals > 0)
+            edge_index_pool = make_edge_index(mask)
+        else:
+            thr = float(A_pool.abs().mean() * 0.1)
+            mask = A_pool > thr
+            edge_index_pool = make_edge_index(mask)
+
+    elif mode == "quantile":
+        flat = A_pool.flatten()
+        pos = flat[flat > 0]
+        if pos.numel() == 0:
+            edge_index_pool = torch.zeros(
+                (2, 0), dtype=torch.long, device=A_pool.device
+            )
+        else:
+            kq = max(1, int((1 - quantile) * pos.numel()))
+            thresh = torch.topk(pos, k=kq, largest=True).values.min()
+            mask = A_pool >= thresh
+            edge_index_pool = make_edge_index(mask)
+
+    elif mode == "energy":
+        flat = A_pool.flatten()
+        pos = flat[flat > 0]
+        if pos.numel() == 0:
+            edge_index_pool = torch.zeros(
+                (2, 0), dtype=torch.long, device=A_pool.device
+            )
+        else:
+            vals_sorted, idx_sorted = torch.sort(pos, descending=True)
+            cumsum = torch.cumsum(vals_sorted, dim=0)
+            total = cumsum[-1]
+            keep_upto = torch.searchsorted(cumsum, energy_frac * total).item() + 1
+            thresh = vals_sorted[keep_upto - 1]
+            mask = A_pool >= thresh
+            edge_index_pool = make_edge_index(mask)
+
+    elif mode == "mst_topk":
+        # Build MST using negative weights (we want maximum spanning tree)
+        # Dense Prim (OK if C moderate)
+        W = A_pool.clone()
+        W[W < 0] = 0
+        selected = torch.zeros(C, dtype=torch.bool, device=W.device)
+        selected[0] = True
+        mst_edges = []
+        for _ in range(C - 1):
+            # edges from selected -> not selected
+            mask_from = selected.unsqueeze(1) & (~selected).unsqueeze(0)
+            cand = W * mask_from
+            val, idx = torch.max(cand.reshape(-1), dim=0)
+            if val <= 0:
+                break
+            r = idx // C
+            c = idx % C
+            mst_edges.append((r.item(), c.item()))
+            selected[c] = True
+        mst_mask = torch.zeros_like(W, dtype=torch.bool)
+        for r, c in mst_edges:
+            mst_mask[r, c] = True
+            mst_mask[c, r] = True
+        # add local top-k
+        k_loc = max(1, topk_per_row) if topk_per_row else 4
+        vals, idxs = torch.topk(W, k=min(k_loc, C), dim=1)
+        topk_mask = torch.zeros_like(W, dtype=torch.bool)
+        topk_mask.scatter_(1, idxs, vals > 0)
+        mask = mst_mask | topk_mask
+        edge_index_pool = make_edge_index(mask)
+
+    elif mode == "knn":
+        # kNN on pooled features
+        Xn = F.normalize(x_pool, dim=-1)
+        sim = Xn @ Xn.t()
+        sim.fill_diagonal_(-1e9)
+        k_loc = min(knn_k, C - 1)
+        vals, idxs = torch.topk(sim, k=k_loc, dim=1)
+        mask = torch.zeros_like(sim, dtype=torch.bool)
+        mask.scatter_(1, idxs, vals > -1e8)
+        edge_index_pool = make_edge_index(mask)
+
+    else:
+        # fallback: simple threshold
+        thr = float(A_pool.abs().mean() * 0.1)
+        mask = A_pool > thr
+        edge_index_pool = make_edge_index(mask)
+
+    return x_pool, edge_index_pool
+
+
 # =========================
 # GNN Building Blocks
 # =========================
@@ -195,6 +344,7 @@ class EdgeGNNLayer(MessagePassing):
             )
         else:  # deeper
             self.mlp_msg = nn.Sequential(
+                # nn.LayerNorm(2 * in_ch + (edge_dim or 0)), #NO FA CASINO
                 nn.Linear(2 * in_ch + (edge_dim or 0), hidden),
                 nonlinearFn,
                 nn.Linear(hidden, hidden),
@@ -202,9 +352,10 @@ class EdgeGNNLayer(MessagePassing):
                 nn.Linear(hidden, hidden),
                 nonlinearFn,
                 nn.Linear(hidden, out_ch),
-                # nn.LayerNorm(out_ch),
+                # nn.LayerNorm(out_ch), # NO FA CASINO
             )
             self.mlp_upd = nn.Sequential(
+                # nn.LayerNorm(in_ch + out_ch), #NO FA CASINO
                 nn.Linear(in_ch + out_ch, hidden),
                 nonlinearFn,
                 nn.Linear(hidden, hidden),
@@ -212,15 +363,18 @@ class EdgeGNNLayer(MessagePassing):
                 nn.Linear(hidden, hidden),
                 nonlinearFn,
                 nn.Linear(hidden, out_ch),
-                # nn.LayerNorm(out_ch),
+                # nn.LayerNorm(out_ch), # NO FA CASINO
             )
 
         self.dropout = nn.Dropout(dropout)
+        self.layernorm = nn.LayerNorm(out_ch)
+        self.graphnorm = GraphNorm(out_ch)
         self.use_res = in_ch == out_ch
         self.edge_dim = edge_dim or 0
 
     def forward(self, x, edge_index, edge_attr, batch=None):
         x = self.dropout(x)
+        # x = self.layernorm(x)
 
         # Self-loops (e padding edge_attr se serve)
         if SELF_LOOP:
@@ -243,7 +397,10 @@ class EdgeGNNLayer(MessagePassing):
         h = self.mlp_upd(h)
         if self.use_res:
             h = h + x
+        # h = self.layernorm(h) # NO FA CASINO
+        h = self.graphnorm(h, batch) if batch is not None else h
         h = F.gelu(h)
+        # h = self.layernorm(h)
         return h
 
     def message(self, x_i, x_j, edge_attr):
@@ -281,7 +438,9 @@ class DiffPoolBlock(nn.Module):
     def forward(self, x, edge_index, edge_attr, tau: float):
         # 1) message passing
         x = self.gnn(x, edge_index, edge_attr, batch=None)
-        x = self.graphnorm(x, torch.zeros(x.size(0), dtype=torch.long, device=x.device))
+        x = self.graphnorm(
+            x, torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        )  # QUESTO ABBASSA LA LOSS
         # 2) soft assignment
         S = F.softmax(self.assign(x) / tau, dim=-1)  # [N, C]
 
@@ -319,12 +478,13 @@ class GraphAutoEncoder(nn.Module):
         ), "Provide a non-empty list of clusters per DiffPool level."
 
         self.in_proj = nn.Sequential(
+            nn.LayerNorm(in_ch),
             nn.Linear(in_ch, hidden),
             nonlinearFn,
             nn.Linear(hidden, hidden),
             nonlinearFn,
             nn.Linear(hidden, hidden),
-            # nn.LayerNorm(hidden),
+            # nn.LayerNorm(hidden),  # NON SERVE
         )
         self.graphnorm = GraphNorm(hidden)
 
@@ -336,12 +496,13 @@ class GraphAutoEncoder(nn.Module):
         # Bottleneck sul grafo più grosso
         self.bottleneck = EdgeGNNLayer(hidden, latent, edge_dim)
         self.latent_up = nn.Sequential(
+            # nn.LayerNorm(latent),  # preconditioning (?)
             nn.Linear(latent, hidden),
             nonlinearFn,
             nn.Linear(hidden, hidden),
             nonlinearFn,
             nn.Linear(hidden, hidden),
-            # nn.LayerNorm(hidden),
+            # nn.LayerNorm(hidden),  # preconditioning (?)
         )
 
         # Decoder: uno per livello
@@ -365,7 +526,7 @@ class GraphAutoEncoder(nn.Module):
 
         # Singolo grafo
         x = self.in_proj(x)
-        x = self.graphnorm(x, torch.zeros(x.size(0), dtype=torch.long, device=x.device))
+        # x = self.graphnorm(x, torch.zeros(x.size(0), dtype=torch.long, device=x.device))
         states = []
 
         # ENCODER
@@ -375,7 +536,7 @@ class GraphAutoEncoder(nn.Module):
 
         # BOTTLENECK (sul grafo coarsest)
         x = self.bottleneck(x, edge_index, edge_attr, batch=None)
-        x = F.gelu(self.latent_up(x))
+        x = self.latent_up(x)
 
         # DECODER + UNPOOL mirrorando gli stati
         for dec, state in zip(reversed(self.decoder), reversed(states)):
@@ -455,12 +616,7 @@ def train(
                     loss_bal = loss_bal + bal
                 w_link, w_ent, w_bal = 1e-3, 1e-4, 1e-3
                 loss_recon = F.mse_loss(pred, tgt)
-                loss = (
-                    loss_recon
-                    + w_link * loss_link
-                    + w_ent * loss_ent
-                    + w_bal * loss_bal
-                )
+                loss = w_ent * loss_ent + w_bal * loss_bal + loss_recon
             else:
                 loss = F.mse_loss(pred, tgt) + lambda_mag * loss_mag
 
